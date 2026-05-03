@@ -50,6 +50,13 @@ enum Cmd {
         /// by Akeyless DFC handle.
         #[arg(long, env = "TABELIAO_SIGNING_KEY")]
         signing_key: String,
+        /// Optional compliance pack to enforce. Format
+        /// `pack_id@version` (e.g. `fedramp-high-openclaw-image@1`).
+        /// When set, the pack runs against the manifest pre-publish,
+        /// any failing test aborts the publish, and the resulting
+        /// `pack_hash` is baked into the `ComplianceAttestation`.
+        #[arg(long, env = "TABELIAO_COMPLIANCE_PACK")]
+        pack: Option<String>,
     },
 }
 
@@ -77,6 +84,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             reference,
             content_type,
             signing_key,
+            pack,
         } => {
             let cfg = AttestationsConfig::from_yaml_path(&config)?;
             let manifest_bytes = std::fs::read(&manifest)?;
@@ -88,6 +96,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 reference,
                 manifest_bytes,
                 manifest_content_type: content_type,
+                compliance_pack_name: pack,
             };
             let outcome = publish(cfg, plan, &signer).await?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);

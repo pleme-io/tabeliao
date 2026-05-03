@@ -24,6 +24,12 @@ pub struct PublishPlan {
     pub reference: String,
     pub manifest_bytes: Vec<u8>,
     pub manifest_content_type: String,
+    /// Optional compliance pack to enforce before publishing. When set,
+    /// tabeliao runs the pack, fails closed on any failure, and bakes
+    /// the resulting `pack_hash` into the `ComplianceAttestation`. The
+    /// `AttestationsConfig`'s compliance block is overridden when this
+    /// is `Some`.
+    pub compliance_pack_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,15 +41,32 @@ pub struct PublishOutcome {
 }
 
 /// # Errors
-/// Returns errors for any step: cartorio admit rejection, network
-/// errors, lacre push rejection.
+/// Returns errors for any step: pack enforcement failure, cartorio
+/// admit rejection, network errors, lacre push rejection.
 pub async fn publish<S: Signer>(
-    cfg: AttestationsConfig,
+    mut cfg: AttestationsConfig,
     plan: PublishPlan,
     signer: &S,
 ) -> Result<PublishOutcome> {
     let digest = manifest_digest(&plan.manifest_bytes);
     let admitted_at = Utc::now();
+
+    if let Some(pack_name) = plan.compliance_pack_name.as_deref() {
+        let pack = crate::compliance::pack_by_name(pack_name)?;
+        let pack_hash = crate::compliance::enforce_pack(&pack, &plan.manifest_bytes)?;
+        let att = crate::compliance::attestation_from_pack(&pack, pack_hash);
+        // Splice the pack-derived attestation into the operator-supplied
+        // config. Source/build/image pillars are author-supplied;
+        // compliance is now load-bearing on the pack run.
+        cfg.attestation.compliance = Some(crate::attestations::ComplianceBlock {
+            framework: att.framework,
+            baseline: att.baseline,
+            profile: att.profile,
+            result_hash: att.result_hash,
+            status: att.status,
+        });
+    }
+
     let input = build_admit_input(cfg, &digest, admitted_at, signer)?;
 
     let client = reqwest::Client::builder()

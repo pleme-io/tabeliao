@@ -1099,6 +1099,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "provas"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tameshi",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1569,6 +1582,7 @@ dependencies = [
  "clap",
  "hex",
  "lacre",
+ "provas",
  "reqwest",
  "serde",
  "serde_json",

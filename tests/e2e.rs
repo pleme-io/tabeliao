@@ -17,6 +17,8 @@
 //!   3. backend received the exact manifest bytes
 //!   4. cartorio's `lookup_by_digest` returns the same id
 
+#![allow(clippy::items_after_statements)]
+
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -151,6 +153,24 @@ fn cfg_for(name: &str, version: &str) -> AttestationsConfig {
 
 const TEST_MANIFEST: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":1},"layers":[]}"#;
 
+/// A FedRAMP-High-compliant manifest: schema v2, official media type,
+/// sha256-pinned config + layer, SLSA provenance ref annotation.
+const FRAMP_COMPLIANT_MANIFEST: &[u8] = br#"{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "size": 100
+  },
+  "layers": [
+    {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "size": 1000}
+  ],
+  "annotations": {
+    "io.pleme.slsa-provenance-ref": "ghcr.io/pleme-io/openclaw@sha256:beef"
+  }
+}"#;
+
 #[tokio::test]
 async fn full_publisher_loop_admits_and_pushes_compliant_image() {
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
@@ -165,6 +185,7 @@ async fn full_publisher_loop_admits_and_pushes_compliant_image() {
         reference: "v1.0.0".into(),
         manifest_bytes: TEST_MANIFEST.to_vec(),
         manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: None,
     };
     let outcome = publish(cfg_for("myimage", "1.0.0"), plan, &signer).await.unwrap();
 
@@ -210,6 +231,7 @@ async fn publish_idempotency_admit_only_once_per_digest() {
         reference: "v1".into(),
         manifest_bytes: TEST_MANIFEST.to_vec(),
         manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: None,
     };
     publish(cfg_for("idem", "1.0.0"), plan1.clone(), &signer)
         .await
@@ -244,6 +266,7 @@ async fn publish_fails_at_admit_stage_when_signing_key_drifts() {
         reference: "v1".into(),
         manifest_bytes: TEST_MANIFEST.to_vec(),
         manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: None,
     };
     // Cartorio currently accepts any 64-hex signature shape.
     let outcome = publish(cfg_for("bad-key", "1.0.0"), plan, &bad_signer)
@@ -288,6 +311,7 @@ async fn publish_surfaces_lacre_rejection_when_org_mismatch() {
         reference: "v1".into(),
         manifest_bytes: TEST_MANIFEST.to_vec(),
         manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: None,
     };
     let result = publish(config, plan, &signer).await;
     let err = result.expect_err("lacre must reject org-mismatch");
@@ -308,6 +332,271 @@ async fn publish_surfaces_lacre_rejection_when_org_mismatch() {
     );
 }
 
+// ─── compliance-pack tests: openclaw FedRAMP-High image proof ──────
+
+#[tokio::test]
+async fn publish_with_compliant_manifest_and_pack_admits_with_pack_hash_in_attestation() {
+    // The provable statement: the artifact's recorded result_hash IS
+    // the pack_hash anyone can re-derive by running the pack against
+    // the same manifest. cartorio holds it in the merkle tree.
+    let (backend_url, backend_recorder) = spawn_mock_backend().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
+
+    let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
+    let plan = PublishPlan {
+        cartorio_url: cartorio_url.clone(),
+        lacre_url,
+        image_path: "myorg/openclaw".into(),
+        reference: "v1.2.3".into(),
+        manifest_bytes: FRAMP_COMPLIANT_MANIFEST.to_vec(),
+        manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: Some("fedramp-high-openclaw-image@1".into()),
+    };
+    let outcome = publish(cfg_for("openclaw", "1.2.3"), plan, &signer).await.unwrap();
+
+    // Cartorio has the artifact, with a compliance attestation whose
+    // result_hash matches what running the pack produces.
+    let live = cartorio_state
+        .store
+        .get_artifact_by_digest(&outcome.digest)
+        .await
+        .expect("admitted");
+    let comp = live.attestation.compliance.as_ref().expect("compliance pillar set");
+    assert_eq!(comp.framework, "FedRAMP");
+    assert_eq!(comp.baseline, "high");
+    assert_eq!(comp.profile, "fedramp-high-openclaw-image@1");
+
+    // Independent verifier path — re-run the pack and confirm the hash
+    // matches what cartorio holds. This is the transferable proof.
+    use provas::{Runner, Target, fedramp_high_openclaw_image_v1};
+    let pack = fedramp_high_openclaw_image_v1();
+    let target = Target::from_oci_manifest_bytes(FRAMP_COMPLIANT_MANIFEST.to_vec());
+    let recomputed = Runner::run_pack(&pack, &target);
+    assert!(recomputed.all_passed);
+    assert_eq!(
+        recomputed.pack_hash, comp.result_hash,
+        "verifier-recomputed pack_hash must equal cartorio-stored result_hash"
+    );
+
+    // Backend received the manifest (lacre forwarded).
+    assert!(
+        backend_recorder
+            .received
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p, body)| m == "PUT"
+                && p.contains("/manifests/")
+                && body == FRAMP_COMPLIANT_MANIFEST)
+    );
+}
+
+#[tokio::test]
+async fn publish_with_non_compliant_manifest_aborts_before_anything_is_admitted() {
+    // The fail-closed property. Bad manifest → pack fails →
+    // tabeliao refuses to call cartorio. Nothing reaches the registry.
+    let (backend_url, backend_recorder) = spawn_mock_backend().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
+
+    let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
+    // schemaVersion 1 + bogus media type — fails multiple pack tests.
+    let bad_manifest = br#"{"schemaVersion":1,"mediaType":"application/vnd.acme.bogus+json"}"#;
+    let plan = PublishPlan {
+        cartorio_url,
+        lacre_url,
+        image_path: "myorg/openclaw".into(),
+        reference: "v1.2.3-bad".into(),
+        manifest_bytes: bad_manifest.to_vec(),
+        manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: Some("fedramp-high-openclaw-image@1".into()),
+    };
+    let result = publish(cfg_for("openclaw", "1.2.3-bad"), plan, &signer).await;
+    let err = result.expect_err("non-compliant manifest must fail closed");
+    let s = err.to_string();
+    assert!(s.contains("FAILED"), "expected pack failure error, got: {s}");
+    assert!(
+        s.contains("oci.schema_version_is_two") || s.contains("oci.has_official_media_type"),
+        "error must name the failing test(s)"
+    );
+
+    // Cartorio holds nothing. Backend saw nothing.
+    assert_eq!(cartorio_state.store.artifact_count().await, 0);
+    assert!(
+        backend_recorder.received.lock().unwrap().is_empty(),
+        "no admission, no push — fully fail-closed"
+    );
+}
+
+#[tokio::test]
+async fn provable_statement_openclaw_is_fedramp_high() {
+    // The headline question: "is openclaw v1.2.3 FedRAMP-High compliant?"
+    // The proof procedure:
+    //   1. Find an Active artifact in cartorio with name=openclaw + version=1.2.3
+    //   2. Read its attestation.compliance: profile must be the
+    //      FedRAMP-High openclaw pack, status must be Compliant
+    //   3. Re-run the pack against the same manifest bytes
+    //   4. Confirm the recomputed pack_hash equals the stored
+    //      result_hash
+    // If all four hold, the statement is provably true.
+    let (backend_url, _backend) = spawn_mock_backend().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
+
+    let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
+    let plan = PublishPlan {
+        cartorio_url: cartorio_url.clone(),
+        lacre_url,
+        image_path: "myorg/openclaw".into(),
+        reference: "v1.2.3".into(),
+        manifest_bytes: FRAMP_COMPLIANT_MANIFEST.to_vec(),
+        manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: Some("fedramp-high-openclaw-image@1".into()),
+    };
+    publish(cfg_for("openclaw", "1.2.3"), plan, &signer).await.unwrap();
+
+    // 1. Find by name + version.
+    let all = cartorio_state.store.list_artifacts(None).await;
+    let openclaw = all
+        .iter()
+        .find(|a| a.name == "openclaw" && a.version == "1.2.3")
+        .expect("openclaw v1.2.3 must exist in ledger");
+    assert_eq!(openclaw.status, cartorio::core::types::ArtifactStatus::Active);
+
+    // 2. Read compliance attestation.
+    let comp = openclaw.attestation.compliance.as_ref().expect("compliance pillar");
+    assert_eq!(comp.profile, "fedramp-high-openclaw-image@1");
+    assert_eq!(
+        comp.status,
+        cartorio::core::types::ComplianceStatus::Compliant
+    );
+    assert_eq!(comp.framework, "FedRAMP");
+    assert_eq!(comp.baseline, "high");
+
+    // 3-4. Re-run the pack against the manifest, confirm hashes match.
+    use provas::{Runner, Target, fedramp_high_openclaw_image_v1};
+    let pack = fedramp_high_openclaw_image_v1();
+    let target = Target::from_oci_manifest_bytes(FRAMP_COMPLIANT_MANIFEST.to_vec());
+    let recomputed = Runner::run_pack(&pack, &target);
+    assert!(recomputed.all_passed, "every pack test must Pass for the proof to hold");
+    assert_eq!(
+        recomputed.pack_hash, comp.result_hash,
+        "verifier hash must equal ledger hash; if these differ, the claim is forged"
+    );
+
+    // QED: openclaw v1.2.3 is FedRAMP-High compliant under
+    // fedramp-high-openclaw-image@1.
+}
+
+#[tokio::test]
+async fn semantic_tamper_changes_pack_hash_and_breaks_the_proof() {
+    // Negative case — semantic tampering (changing a field a test
+    // looks at) makes the pack_hash no longer match. NOTE: byte-level
+    // tampering that doesn't change parsed semantics (e.g. trailing
+    // whitespace) yields the SAME pack_hash — that's deliberate. The
+    // pack proves "compliance behavior is invariant"; cartorio's
+    // separate `digest` field handles byte-identity. Both layers
+    // together = full tamper-evidence. See companion test below.
+    let (backend_url, _backend) = spawn_mock_backend().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
+
+    let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
+    let plan = PublishPlan {
+        cartorio_url,
+        lacre_url,
+        image_path: "myorg/openclaw".into(),
+        reference: "v1.2.3".into(),
+        manifest_bytes: FRAMP_COMPLIANT_MANIFEST.to_vec(),
+        manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: Some("fedramp-high-openclaw-image@1".into()),
+    };
+    let outcome = publish(cfg_for("openclaw", "1.2.3"), plan, &signer).await.unwrap();
+    let stored = cartorio_state
+        .store
+        .get_artifact_by_digest(&outcome.digest)
+        .await
+        .unwrap();
+    let stored_hash = stored.attestation.compliance.unwrap().result_hash;
+
+    // SEMANTIC tamper: replace the layer's sha256 digest with `latest`
+    // — a tag, not a content digest. Now the pinning test fails →
+    // outcome differs → pack_hash differs.
+    let tampered: Vec<u8> = String::from_utf8(FRAMP_COMPLIANT_MANIFEST.to_vec())
+        .unwrap()
+        .replace(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "latest",
+        )
+        .into_bytes();
+    use provas::{Runner, Target, fedramp_high_openclaw_image_v1};
+    let pack = fedramp_high_openclaw_image_v1();
+    let target = Target::from_oci_manifest_bytes(tampered);
+    let recomputed = Runner::run_pack(&pack, &target);
+    assert!(
+        !recomputed.all_passed,
+        "the unpinned-layer tamper must produce at least one failing test"
+    );
+    assert_ne!(
+        recomputed.pack_hash, stored_hash,
+        "semantic tamper MUST yield a different pack_hash"
+    );
+}
+
+#[tokio::test]
+async fn byte_only_tamper_yields_same_pack_hash_but_different_digest() {
+    // Documents the boundary: trailing whitespace is byte-different
+    // but semantically equivalent. The pack returns the same hash.
+    // Cartorio's content addressing (the `digest` field) is the layer
+    // that catches byte tampering. Two layers compose to full
+    // tamper-evidence: pack ↔ behavior, digest ↔ bytes.
+    use provas::{Runner, Target, fedramp_high_openclaw_image_v1};
+    let pack = fedramp_high_openclaw_image_v1();
+    let original = Target::from_oci_manifest_bytes(FRAMP_COMPLIANT_MANIFEST.to_vec());
+    let with_trailing_ws: Vec<u8> = FRAMP_COMPLIANT_MANIFEST
+        .iter()
+        .copied()
+        .chain([b' '])
+        .collect();
+    let tampered = Target::from_oci_manifest_bytes(with_trailing_ws.clone());
+
+    let r1 = Runner::run_pack(&pack, &original);
+    let r2 = Runner::run_pack(&pack, &tampered);
+    assert_eq!(
+        r1.pack_hash, r2.pack_hash,
+        "semantically-equivalent bytes yield same pack_hash by design"
+    );
+
+    // Cartorio identifies artifacts by sha256(bytes), so these two
+    // manifests are DIFFERENT artifacts — separately admitted.
+    let d1 = tabeliao::publish::manifest_digest(FRAMP_COMPLIANT_MANIFEST);
+    let d2 = tabeliao::publish::manifest_digest(&with_trailing_ws);
+    assert_ne!(d1, d2, "byte-level tamper changes cartorio's digest field");
+}
+
+#[tokio::test]
+async fn unknown_pack_name_aborts_publish_at_input_validation() {
+    let (backend_url, _backend) = spawn_mock_backend().await;
+    let (cartorio_url, _cstate) = spawn_cartorio().await;
+    let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
+
+    let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
+    let plan = PublishPlan {
+        cartorio_url,
+        lacre_url,
+        image_path: "myorg/openclaw".into(),
+        reference: "v1.2.3".into(),
+        manifest_bytes: FRAMP_COMPLIANT_MANIFEST.to_vec(),
+        manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: Some("not-a-real-pack@99".into()),
+    };
+    let err = publish(cfg_for("openclaw", "1.2.3"), plan, &signer)
+        .await
+        .expect_err("unknown pack must abort");
+    assert!(err.to_string().contains("unknown compliance pack"));
+}
+
 #[tokio::test]
 async fn publish_to_unreachable_cartorio_returns_network_error() {
     let (backend_url, _backend) = spawn_mock_backend().await;
@@ -322,6 +611,7 @@ async fn publish_to_unreachable_cartorio_returns_network_error() {
         reference: "v1".into(),
         manifest_bytes: TEST_MANIFEST.to_vec(),
         manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: None,
     };
     let result = publish(cfg_for("dead", "1.0.0"), plan, &signer).await;
     let err = result.expect_err("must fail when cartorio is unreachable");
