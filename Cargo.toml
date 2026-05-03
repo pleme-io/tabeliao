@@ -1,0 +1,52 @@
+[package]
+name = "tabeliao"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+authors = ["Pleme Team <team@pleme.io>"]
+description = "Publisher-side companion to cartorio + lacre — collects attestations, signs, submits CompliantListing, and pushes the manifest. Closes the operator loop."
+license = "MIT"
+repository = "https://github.com/pleme-io/tabeliao"
+
+[lib]
+name = "tabeliao"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tabeliao"
+path = "src/main.rs"
+
+[dependencies]
+cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.3.2" }
+tameshi = "0.1"
+tokio = { version = "1.50", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml_ng = "0.10"
+sha2 = "0.10"
+blake3 = "1.8"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+
+[lints.clippy]
+pedantic = "warn"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.14"
+axum = { version = "0.8", features = ["json"] }
+tower = { version = "0.5", features = ["util"] }
+# E2E: tabeliao → cartorio + lacre (path deps so we test against the
+# local working trees, not the published ones).
+lacre = { path = "../lacre" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,183 @@
+//! YAML-authored attestations config.
+//!
+//! Operator's view: this is the file you edit per artifact. It carries
+//! the four pillars (source / build / image / compliance) plus the
+//! identifying fields. Lazily-typed: missing pillars are `None`, which
+//! cartorio rejects per `kind.required_pillars()`.
+
+use std::path::Path;
+
+use cartorio::core::types::{
+    ArtifactKind, AttestationChain, BuildAttestation, ComplianceAttestation, ComplianceStatus,
+    ImageAttestation, SourceAttestation,
+};
+use serde::{Deserialize, Serialize};
+use tameshi::hash::Blake3Hash;
+
+use crate::error::{Result, TabeliaoError};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationsConfig {
+    pub kind: ArtifactKind,
+    pub name: String,
+    pub version: String,
+    pub publisher_id: String,
+    pub org: String,
+    #[serde(default)]
+    pub attestation: AttestationsBlock,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct AttestationsBlock {
+    pub source: Option<SourceBlock>,
+    pub build: Option<BuildBlock>,
+    pub image: Option<ImageBlock>,
+    pub compliance: Option<ComplianceBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceBlock {
+    pub git_commit: String,
+    pub tree_hash: Blake3Hash,
+    pub flake_lock_hash: Blake3Hash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildBlock {
+    pub closure_hash: Blake3Hash,
+    pub sbom_hash: Blake3Hash,
+    pub slsa_level: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageBlock {
+    /// `cosign_signature_ref` and `slsa_provenance_ref` are operator-
+    /// supplied. The `oci_digest` is filled in by tabeliao at publish
+    /// time from the manifest body's hash — it is NOT authored.
+    pub cosign_signature_ref: String,
+    pub slsa_provenance_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceBlock {
+    pub framework: String,
+    pub baseline: String,
+    pub profile: String,
+    pub result_hash: Blake3Hash,
+    pub status: ComplianceStatus,
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_YAML: &str = r"
+kind: oci-image
+name: my-app
+version: 1.0.0
+publisher_id: alice@pleme.io
+org: pleme-io
+attestation:
+  source:
+    git_commit: abc123
+    tree_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    flake_lock_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  build:
+    closure_hash: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    sbom_hash: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    slsa_level: 3
+  image:
+    cosign_signature_ref: ghcr.io/x:sig
+    slsa_provenance_ref: ghcr.io/x:prov
+  compliance:
+    framework: NIST_800_53
+    baseline: high
+    profile: nist-800-53-high
+    result_hash: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    status: compliant
+";
+
+    #[test]
+    fn parse_full_yaml_roundtrips() {
+        let cfg: AttestationsConfig = serde_yaml_ng::from_str(SAMPLE_YAML).unwrap();
+        assert_eq!(cfg.name, "my-app");
+        assert_eq!(cfg.publisher_id, "alice@pleme.io");
+        assert!(cfg.attestation.source.is_some());
+        assert!(cfg.attestation.build.is_some());
+        assert!(cfg.attestation.image.is_some());
+        assert!(cfg.attestation.compliance.is_some());
+    }
+
+    #[test]
+    fn into_attestation_chain_uses_supplied_digest_for_image_pillar() {
+        let cfg: AttestationsConfig = serde_yaml_ng::from_str(SAMPLE_YAML).unwrap();
+        let chain = cfg.into_attestation_chain("sha256:beefbeef");
+        let image = chain.image.unwrap();
+        assert_eq!(image.oci_digest, "sha256:beefbeef");
+        assert_eq!(image.cosign_signature_ref, "ghcr.io/x:sig");
+    }
+
+    #[test]
+    fn empty_attestation_block_yields_all_none_pillars() {
+        let yaml = r"
+kind: oci-image
+name: bare
+version: 0.0.0
+publisher_id: bob
+org: pleme-io
+";
+        let cfg: AttestationsConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let chain = cfg.into_attestation_chain("sha256:1");
+        assert!(chain.source.is_none());
+        assert!(chain.build.is_none());
+        assert!(chain.image.is_none());
+        assert!(chain.compliance.is_none());
+    }
+}
+
+impl AttestationsConfig {
+    /// # Errors
+    /// Fails on filesystem read errors or YAML parse errors.
+    pub fn from_yaml_path(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|e| TabeliaoError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        let cfg: Self = serde_yaml_ng::from_str(&text).map_err(|e| TabeliaoError::Yaml {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        Ok(cfg)
+    }
+
+    /// Build the cartorio `AttestationChain` from this config, splicing
+    /// in the manifest digest for the image pillar's `oci_digest`.
+    #[must_use]
+    pub fn into_attestation_chain(self, manifest_digest: &str) -> AttestationChain {
+        AttestationChain {
+            source: self.attestation.source.map(|s| SourceAttestation {
+                git_commit: s.git_commit,
+                tree_hash: s.tree_hash,
+                flake_lock_hash: s.flake_lock_hash,
+            }),
+            build: self.attestation.build.map(|b| BuildAttestation {
+                closure_hash: b.closure_hash,
+                sbom_hash: b.sbom_hash,
+                slsa_level: b.slsa_level,
+            }),
+            image: self.attestation.image.map(|i| ImageAttestation {
+                oci_digest: manifest_digest.to_string(),
+                cosign_signature_ref: i.cosign_signature_ref,
+                slsa_provenance_ref: i.slsa_provenance_ref,
+            }),
+            compliance: self.attestation.compliance.map(|c| ComplianceAttestation {
+                framework: c.framework,
+                baseline: c.baseline,
+                profile: c.profile,
+                result_hash: c.result_hash,
+                status: c.status,
+            }),
+        }
+    }
+}
