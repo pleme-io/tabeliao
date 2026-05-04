@@ -191,6 +191,67 @@ mod tests {
     }
 
     #[test]
+    fn bundle_wire_format_matches_cosign_canonical_shape() {
+        // SNAPSHOT — the JSON keys cosign sign-blob --bundle emits.
+        // Renaming any of these breaks interop with stock cosign tools.
+        let sk = test_signer();
+        let bundle = sign_blob_to_bundle(&sk, b"x").unwrap();
+        let json = serde_json::to_value(&bundle).unwrap();
+        // base64Signature: required, present.
+        assert!(
+            json.get("base64Signature").is_some(),
+            "missing base64Signature key (cosign wire format)"
+        );
+        // cert: present (PEM SPKI today; Fulcio cert chain in vNext).
+        assert!(json.get("cert").is_some(), "missing cert key");
+        // rekorBundle: skipped when None (skip_serializing_if).
+        assert!(
+            json.get("rekorBundle").is_none(),
+            "rekorBundle must be absent when None; cosign treats absent == null"
+        );
+    }
+
+    #[test]
+    fn bundle_with_rekor_serializes_rekor_bundle_in_canonical_shape() {
+        // When the Rekor field is populated (full keyless), the wire
+        // shape must match cosign's: SignedEntryTimestamp + Payload.
+        use super::{RekorBundle, RekorPayload};
+        let bundle = CosignBundle {
+            base64_signature: "abc".into(),
+            cert: Some("PEM".into()),
+            rekor_bundle: Some(RekorBundle {
+                signed_entry_timestamp: "sig".into(),
+                payload: RekorPayload {
+                    body: "body".into(),
+                    integrated_time: 1_700_000_000,
+                    log_index: 42,
+                    log_id: "logid".into(),
+                },
+            }),
+        };
+        let json = serde_json::to_value(&bundle).unwrap();
+        assert!(json["rekorBundle"]["SignedEntryTimestamp"].is_string());
+        assert!(json["rekorBundle"]["Payload"]["body"].is_string());
+        assert_eq!(
+            json["rekorBundle"]["Payload"]["integratedTime"],
+            serde_json::json!(1_700_000_000)
+        );
+        assert_eq!(json["rekorBundle"]["Payload"]["logIndex"], serde_json::json!(42));
+        assert_eq!(json["rekorBundle"]["Payload"]["logID"], "logid");
+    }
+
+    #[test]
+    fn bundle_round_trips_via_json() {
+        let sk = test_signer();
+        let bundle = sign_blob_to_bundle(&sk, b"some-blob").unwrap();
+        let json = serde_json::to_string(&bundle).unwrap();
+        let back: CosignBundle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.base64_signature, bundle.base64_signature);
+        assert_eq!(back.cert, bundle.cert);
+        verify_blob_bundle(&back, b"some-blob", &sk.verifying_key()).unwrap();
+    }
+
+    #[test]
     fn pem_round_trips_through_x509_parser() {
         // Best-effort: the PEM body must be valid base64 of a 44-byte
         // DER SPKI blob. We don't pull in a full ASN.1 parser here
