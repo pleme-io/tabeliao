@@ -6,7 +6,8 @@
 use cartorio::core::types::{ComplianceAttestation, ComplianceStatus};
 use provas::{
     BundleMember, Pack, Runner, Target, fedramp_high_openclaw_bundle_v1,
-    fedramp_high_openclaw_helm_v1, fedramp_high_openclaw_image_v1,
+    fedramp_high_openclaw_helm_content_v1, fedramp_high_openclaw_helm_v1,
+    fedramp_high_openclaw_image_v1, fedramp_high_openclaw_image_v2,
 };
 use tameshi::hash::Blake3Hash;
 
@@ -19,14 +20,34 @@ use crate::error::{Result, TabeliaoError};
 pub fn pack_by_name(name: &str) -> Result<Pack> {
     match name {
         "fedramp-high-openclaw-image@1" => Ok(fedramp_high_openclaw_image_v1()),
+        "fedramp-high-openclaw-image@2" => Ok(fedramp_high_openclaw_image_v2()),
         "fedramp-high-openclaw-helm@1" => Ok(fedramp_high_openclaw_helm_v1()),
+        "fedramp-high-openclaw-helm-content@1" => Ok(fedramp_high_openclaw_helm_content_v1()),
         "fedramp-high-openclaw-bundle@1" => Ok(fedramp_high_openclaw_bundle_v1()),
         other => Err(TabeliaoError::InvalidInput(format!(
             "unknown compliance pack: {other:?}; known: \
-             fedramp-high-openclaw-image@1, fedramp-high-openclaw-helm@1, \
+             fedramp-high-openclaw-image@1, fedramp-high-openclaw-image@2, \
+             fedramp-high-openclaw-helm@1, fedramp-high-openclaw-helm-content@1, \
              fedramp-high-openclaw-bundle@1"
         ))),
     }
+}
+
+/// Run a helm-content pack against parsed Chart.yaml + values.yaml +
+/// templates. The substantive helm compliance surface — verifies the
+/// chart's actual configuration, not just its OCI manifest envelope.
+///
+/// # Errors
+/// Returns `Err` if any test fails.
+pub fn enforce_helm_content_pack(
+    pack: &Pack,
+    chart_yaml: &str,
+    values_yaml: &str,
+    templates: std::collections::BTreeMap<String, Vec<u8>>,
+) -> Result<Blake3Hash> {
+    let target = Target::from_helm_chart_sources(chart_yaml, values_yaml, templates)
+        .map_err(|e| TabeliaoError::InvalidInput(format!("helm chart yaml parse: {e}")))?;
+    enforce_inner(pack, &target)
 }
 
 /// Run a helm pack against a helm-OCI manifest body.

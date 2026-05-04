@@ -1,6 +1,6 @@
 [package]
 name = "tabeliao"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["Pleme Team <team@pleme.io>"]
@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.3.3" }
-provas = { path = "../provas" }
+provas = { git = "https://github.com/pleme-io/provas", tag = "v0.3.0" }
 tameshi = "0.1"
 tokio = { version = "1.50", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -1,0 +1,107 @@
+name: 'tabeliao-publish'
+description: |
+  Publish a compliant artifact to cartorio + push through lacre.
+  Runs the named provas compliance pack against the manifest pre-publish
+  and FAILS THE BUILD if any test fails. Bakes the deterministic
+  pack_hash into the cartorio admission so verifiers can re-derive
+  the proof from public inputs (no trust in pleme-io required).
+
+  See cartorio/docs/COMPLIANCE-PROOF.md for the underlying model.
+
+inputs:
+  manifest:
+    description: 'Path to the OCI manifest body (raw bytes, hashed as-is).'
+    required: true
+  config:
+    description: 'Path to the YAML attestations config (kind, name, version, attestation pillars).'
+    required: true
+  cartorio-url:
+    description: 'Cartorio base URL.'
+    required: true
+  lacre-url:
+    description: 'Lacre base URL.'
+    required: true
+  image-path:
+    description: 'OCI image path (e.g. myorg/openclaw-publisher-pki).'
+    required: true
+  reference:
+    description: 'Reference to push under (tag or digest).'
+    required: true
+  pack:
+    description: |
+      Compliance pack name (e.g. fedramp-high-openclaw-image@2). REQUIRED
+      — without it tabeliao admits without proof, which the action refuses.
+    required: true
+  signing-key:
+    description: '64-hex-char signing key. Use a GitHub secret.'
+    required: true
+  content-type:
+    description: 'Manifest content-type.'
+    required: false
+    default: 'application/vnd.oci.image.manifest.v1+json'
+  tabeliao-version:
+    description: 'tabeliao version to install (without leading v).'
+    required: false
+    default: '0.3.0'
+
+outputs:
+  artifact-id:
+    description: 'Cartorio-assigned artifact id (art-...).'
+    value: ${{ steps.publish.outputs.artifact-id }}
+  digest:
+    description: 'sha256 digest of the manifest.'
+    value: ${{ steps.publish.outputs.digest }}
+  composed-root:
+    description: 'state-leaf composed_root of the admitted artifact.'
+    value: ${{ steps.publish.outputs.composed-root }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: install tabeliao
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Determine platform.
+        case "$(uname -s)/$(uname -m)" in
+          Linux/x86_64)   TARGET="x86_64-unknown-linux-gnu" ;;
+          Linux/aarch64)  TARGET="aarch64-unknown-linux-gnu" ;;
+          Darwin/x86_64)  TARGET="x86_64-apple-darwin" ;;
+          Darwin/arm64)   TARGET="aarch64-apple-darwin" ;;
+          *) echo "unsupported platform: $(uname -s)/$(uname -m)"; exit 1 ;;
+        esac
+        VERSION="${{ inputs.tabeliao-version }}"
+        URL="https://github.com/pleme-io/tabeliao/releases/download/v${VERSION}/tabeliao-${TARGET}.tar.gz"
+        curl -sSfL "$URL" -o /tmp/tabeliao.tar.gz || {
+          echo "tabeliao v${VERSION} not yet released for ${TARGET};"
+          echo "falling back to cargo install (slower, requires Rust)"
+          cargo install --git https://github.com/pleme-io/tabeliao --tag "v${VERSION}" tabeliao
+          exit 0
+        }
+        mkdir -p /tmp/tabeliao
+        tar -xzf /tmp/tabeliao.tar.gz -C /tmp/tabeliao
+        sudo install /tmp/tabeliao/tabeliao /usr/local/bin/tabeliao
+        tabeliao --version
+
+    - name: enforce pack + publish
+      id: publish
+      shell: bash
+      env:
+        TABELIAO_SIGNING_KEY: ${{ inputs.signing-key }}
+      run: |
+        set -euo pipefail
+        OUTPUT=$(tabeliao publish \
+          --manifest      '${{ inputs.manifest }}' \
+          --config        '${{ inputs.config }}' \
+          --cartorio      '${{ inputs.cartorio-url }}' \
+          --lacre         '${{ inputs.lacre-url }}' \
+          --image         '${{ inputs.image-path }}' \
+          --reference     '${{ inputs.reference }}' \
+          --content-type  '${{ inputs.content-type }}' \
+          --pack          '${{ inputs.pack }}' \
+          --signing-key   "${TABELIAO_SIGNING_KEY}")
+        echo "$OUTPUT"
+        # tabeliao publish emits JSON to stdout on success.
+        echo "artifact-id=$(echo "$OUTPUT" | jq -r .artifact_id)" >> "$GITHUB_OUTPUT"
+        echo "digest=$(echo "$OUTPUT" | jq -r .digest)" >> "$GITHUB_OUTPUT"
+        echo "composed-root=$(echo "$OUTPUT" | jq -r .composed_root)" >> "$GITHUB_OUTPUT"

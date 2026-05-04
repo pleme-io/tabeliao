@@ -55,6 +55,53 @@ impl Blake3Signer {
     }
 }
 
+/// **SCAFFOLD** — Sigstore/cosign signer. Holds a configuration; the
+/// `sign()` impl is a placeholder until full sigstore-rs integration
+/// lands. The trait is implemented so callers can already use the
+/// type behind `Box<dyn Signer>`; production deployments must NOT use
+/// this in its current form.
+///
+/// Upgrade path (Phase B):
+///   - Replace placeholder body with `sigstore::cosign::Client::sign`
+///   - Identity from Fulcio cert (`cosign sign --identity-token`)
+///   - Transparency log entry submitted to Rekor
+///   - Verification side: `sigstore::cosign::Client::verify` against
+///     the chosen verifier policy (Fulcio root + Rekor log proof)
+///
+/// The `SignedRoot.signature` field becomes the cosign signature
+/// bytes (hex-encoded); `signer_id` becomes the Fulcio cert
+/// identity (e.g. `oidc:github://repo:org/repo@ref:refs/heads/main`).
+pub struct CosignSigner {
+    pub fulcio_url: String,
+    pub rekor_url: String,
+    pub identity_token_oidc_issuer: String,
+}
+
+impl CosignSigner {
+    /// # Errors
+    /// Currently always returns `Err` — this is a scaffold.
+    pub fn new(_fulcio_url: String, _rekor_url: String, _oidc_issuer: String) -> Result<Self> {
+        Err(TabeliaoError::InvalidInput(
+            "CosignSigner is a scaffold; full Sigstore integration is not yet implemented. \
+             Use Blake3Signer for v0.3.x and track the sigstore-rs upgrade in tabeliao/docs/COSIGN-PLAN.md."
+                .into(),
+        ))
+    }
+}
+
+impl Signer for CosignSigner {
+    fn sign(
+        &self,
+        _root: &Blake3Hash,
+        _signer_id: &str,
+        _signed_at: DateTime<Utc>,
+    ) -> Result<SignedRoot> {
+        Err(TabeliaoError::InvalidInput(
+            "CosignSigner.sign is a scaffold; not implemented".into(),
+        ))
+    }
+}
+
 impl Signer for Blake3Signer {
     fn sign(
         &self,
