@@ -1207,8 +1207,8 @@ dependencies = [
 
 [[package]]
 name = "provas"
-version = "0.3.0"
-source = "git+https://github.com/pleme-io/provas?tag=v0.3.0#5a2645b4b8066409bb6cd365e2e85a57b7b13fdc"
+version = "0.3.1"
+source = "git+https://github.com/pleme-io/provas?tag=v0.3.1#588e4905bcfc180803093eb0ed293c7ff0b2d636"
 dependencies = [
  "blake3",
  "clap",
@@ -1745,7 +1745,7 @@ dependencies = [
 
 [[package]]
 name = "tabeliao"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64",

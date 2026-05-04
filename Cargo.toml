@@ -21,7 +21,7 @@ cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.4.1" }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
 base64 = "0.22"
-provas = { git = "https://github.com/pleme-io/provas", tag = "v0.3.0" }
+provas = { git = "https://github.com/pleme-io/provas", tag = "v0.3.1" }
 tameshi = "0.1"
 tokio = { version = "1.50", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
