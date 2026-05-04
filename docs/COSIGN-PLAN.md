@@ -1,92 +1,154 @@
-# Cosign / Sigstore integration — upgrade plan
+# Cosign / Sigstore — current state + remaining keyless upgrade
 
-## Status
+## Current state (v0.6.0)
 
-- v0.3.x: `Blake3Signer` produces deterministic keyed-HMAC signatures.
-  Cartorio validates *signature shape* (64 hex chars, non-empty
-  `signer_id`) but not cryptographic validity. `CosignSigner` is a
-  scaffold (`Signer` trait implemented; `sign()` returns an error).
+✅ **Real Ed25519 signing** — the same cryptographic primitive Sigstore
+uses. `Ed25519Signer` produces 64-byte signatures over the state-leaf
+root. Cartorio v0.4.1 verifies them via `verify_ed25519_signed_root`.
 
-- vNext (planned): Real Sigstore — Fulcio identity, Rekor transparency
-  log, per-publisher signing keys.
+✅ **cosign-bundle wire format** — `tabeliao::cosign::sign_blob_to_bundle`
+produces JSON in the exact shape `cosign sign-blob --bundle=...`
+emits. `tabeliao::cosign::verify_blob_bundle` verifies. Stock
+`cosign verify-blob --bundle=...` interoperates because:
+- `base64Signature`: real Ed25519 signature, base64-encoded.
+- `cert`: PEM-encoded SubjectPublicKeyInfo (RFC 8410 — the format
+  `cosign verify-blob --key cosign.pub` reads).
+- `rekorBundle`: `null` (currently no transparency log entry).
 
-## Why this is deferred
+✅ **`CosignSigner = Ed25519Signer`** — the trait and type alias are
+public. Production deployments construct it from a key persisted in
+their secret manager (Akeyless DFC, Hashicorp Vault, Kubernetes
+Secret).
 
-Full Sigstore integration in Rust requires:
+✅ **Verifier-side cryptographic check** — cartorio v0.4.1 dispatches by
+`SigningAlgorithm`: Blake3KeyedHmac → 64 hex (shape-only),
+Ed25519 → 128 hex + verify against configured public-key allowlist.
 
-- `sigstore-rs` crate integration — async client, OIDC token flow for
-  Fulcio cert issuance, Rekor inclusion proof.
-- A working OIDC issuer for the publisher (GitHub Actions, Google,
-  internal Authentik) — the publisher's identity becomes a Fulcio cert.
-- Verifier-side policy: which Fulcio roots are trusted, which Rekor
-  instance, what identity claims are allowed (e.g. only
-  `repo:pleme-io/openclaw-publisher-pki@ref:refs/heads/main` may sign
-  openclaw-publisher-pki listings).
-- Cartorio-side validation: replace the shape-only signature check
-  with actual cosign verification.
+## What's needed for full keyless (Fulcio + Rekor)
 
-That's a multi-day chunk of work that touches every layer of the
-stack. Phase A scope ships without it; the proof model already works
-because `pack_hash` is an independent constructive proof — cosign
-adds *who* signed, not *whether the proof is valid*.
+Three production-infrastructure pieces, none of which is tabeliao or
+cartorio code:
 
-## Upgrade procedure (when ready)
+### 1. OIDC token issuance
 
-1. **Add sigstore-rs deps in tabeliao:**
-   ```toml
-   sigstore = { version = "0.10", features = ["full-native-tls"] }
+The publisher proves their identity to Fulcio via an OIDC token. The
+issuer depends on where the publisher runs:
+
+| Environment | Issuer |
+|---|---|
+| GitHub Actions CI | GitHub Actions OIDC (built-in) |
+| Local human signer | Browser-based interactive flow against an internal Authentik or Google |
+| Kubernetes pod signer | K8s ServiceAccount projection → Spire / cert-manager |
+
+This is **deployment configuration**, not code. tabeliao gains a
+`--oidc-issuer` flag; the OIDC token gets passed to step (2).
+
+### 2. Fulcio short-lived cert
+
+Exchange the OIDC token at Fulcio for a short-lived (10-minute) X.509
+cert bound to the OIDC subject. The tabeliao change:
+
+```rust
+// In src/sign.rs — replace Ed25519Signer's static keypair with
+// an ephemeral Fulcio-cert-bound keypair.
+pub struct SigstoreSigner {
+    fulcio_client: sigstore::fulcio::FulcioClient,
+    rekor_client: sigstore::rekor::RekorClient,
+    oidc_token: String,
+}
+
+impl Signer for SigstoreSigner {
+    fn sign(&self, root: &Blake3Hash, _: &str, _: DateTime<Utc>) -> Result<SignedRoot> {
+        // 1. Generate ephemeral Ed25519 keypair
+        // 2. Submit pubkey + OIDC token to Fulcio → cert chain
+        // 3. Sign root with ephemeral private key
+        // 4. Submit (sig, cert, root) to Rekor → inclusion proof
+        // 5. Return SignedRoot { signature, algorithm: Ed25519, signer_id: <fulcio cert subject> }
+        //    + populate cosign bundle's `cert` (Fulcio chain) and
+        //    `rekorBundle` (inclusion proof) — verifier reads them
+        //    via the existing `verify_blob_bundle` shape.
+    }
+}
+```
+
+The cosign bundle wire format **does not change** — the `cert` field
+becomes the Fulcio cert chain (PEM-encoded x509) instead of the
+publisher's static SPKI. Verifiers (including stock cosign) keep
+working unchanged.
+
+### 3. Rekor inclusion proof
+
+Submit the (signature, cert, message) to a Rekor instance for the
+public transparency log entry. Returns the entry's body + integrated
+timestamp + log index + log ID — all four populate the bundle's
+`rekorBundle` field. Verifiers can confirm inclusion by re-fetching
+the entry and matching the proof.
+
+### 4. Cartorio admission policy
+
+Cartorio currently dispatches by `SigningAlgorithm` to choose the
+verify path. For full keyless, it gains an admission-policy config:
+
+```rust
+// In src/state.rs or a new src/policy.rs:
+pub struct VerifierPolicy {
+    /// Which Fulcio identities (OIDC subjects) may sign for this
+    /// org+framework+baseline. e.g. for FedRAMP-High openclaw:
+    ///   "repo:pleme-io/openclaw-publisher-pki@refs/heads/main"
+    pub allowed_subjects: BTreeSet<String>,
+    /// Trusted Fulcio root certs (TUF-distributed; pinned).
+    pub fulcio_roots: Vec<X509Cert>,
+    /// Required Rekor instance(s).
+    pub rekor_urls: Vec<String>,
+}
+```
+
+The admission handler gets:
+
+```rust
+if matches!(input.signed_root.algorithm, SigningAlgorithm::Ed25519) {
+    // (a) Parse cert chain from cosign bundle
+    // (b) Verify chain against fulcio_roots
+    // (c) Verify cert subject is in allowed_subjects
+    // (d) Verify Rekor inclusion proof against rekor_urls
+    // (e) Verify signature with cert's public key
+}
+```
+
+This is the layer that says "only signed by GitHub Actions in the
+openclaw-publisher-pki repo's main branch counts as a valid
+FedRAMP-High admission."
+
+## Why this is layered the way it is
+
+The `pack_hash` is a **constructive proof** — anyone with the pack
+source code + the artifact bytes can re-derive it. No signer
+required for the proof's mathematical validity.
+
+Cosign answers the orthogonal question of *"who attested this
+proof"* — useful for audit trails and policy. Today (v0.6.0) we use
+a publisher-managed Ed25519 keypair; vNext we use Fulcio-issued
+ephemeral certs bound to OIDC identity. The wire format is identical.
+
+## v0.6.0 deployment usage
+
+For a deployment that's **NOT** ready for full keyless yet:
+
+1. Generate an Ed25519 keypair per publisher (one-time):
+   ```rust
+   let signer = Ed25519Signer::generate();
+   let private_hex = hex::encode(signer.signing_key.to_bytes());
+   let public_hex = signer.verifying_key_hex();
+   // Store private_hex in Akeyless / Vault.
+   // Distribute public_hex to cartorio's verifier_policy.
    ```
 
-2. **Replace `CosignSigner` body** in `src/sign.rs`:
-   - Use `sigstore::fulcio::FulcioClient::request_certificate` with
-     OIDC token from env (`SIGSTORE_ID_TOKEN` / GitHub Actions OIDC).
-   - Sign the state-leaf root with the ephemeral key bound to the
-     Fulcio cert.
-   - Submit to Rekor via `sigstore::rekor::RekorClient::create_entry`.
-   - Set `SignedRoot.signature` = hex of cosign signature bytes.
-   - Set `SignedRoot.signer_id` = Fulcio cert subject (e.g.
-     `oidc:repo:pleme-io/openclaw-publisher-pki@refs/heads/main`).
-   - Set `SignedRoot.algorithm` = new variant `SigningAlgorithm::CosignFulcio`
-     (requires bumping cartorio's enum, breaking wire format → cartorio v0.4).
+2. Configure cartorio's verifier policy with the publisher's public
+   key in `verifier.ed25519_publisher_keys[publisher_id]`.
 
-3. **Cartorio: replace `verify_signed_root_shape` with full verify** in
-   `src/merkle.rs`:
-   - When `algorithm = CosignFulcio`, call
-     `sigstore::cosign::Client::verify` with:
-     - The state-leaf root as the message
-     - The signature from `SignedRoot.signature`
-     - The cert chain (cached in cartorio? or fetched from a known URL?)
-     - Verifier policy (Fulcio root + Rekor URL)
-   - If verification fails → reject admission with the cosign error.
+3. Tabeliao publishes with `--signing-key $PRIVATE_HEX`; cartorio
+   verifies with the configured public key; auditors can fetch the
+   cosign bundle and verify with stock cosign tooling.
 
-4. **Cartorio admission policy**: the admission handler gains an
-   optional `verifier_policy: VerifierPolicy` config field that
-   specifies the Fulcio identity allowlist per `(framework, baseline)`.
-   E.g. for FedRAMP-High: only `repo:pleme-io/*@refs/heads/main` may
-   sign FedRAMP-High admissions.
-
-5. **provas-verify**: add a `--verify-signature` flag that re-runs the
-   cosign verify step. Without the flag, only `pack_hash` is verified
-   (current behavior); with it, the full chain (pack + cosign + Rekor
-   inclusion) is checked.
-
-## Test plan
-
-- New tabeliao integration test: `cosign_sign_round_trip` that signs +
-  verifies + posts to a local sigstore-rs test fixture.
-- Cartorio extended_tamper.rs gains: `cosign_signature_for_wrong_root_rejected`,
-  `cosign_signature_from_unauthorized_identity_rejected`.
-- provas-verify gains: `--verify-signature` integration test.
-
-## Why this matters less than it seems
-
-The `pack_hash` is a constructive proof: anyone with the pack source
-+ the artifact bytes can re-derive it without trusting any signer.
-Cosign answers the orthogonal question of "*who* attested this
-proof" — useful for audit trails and policy (e.g. "only signed by
-GitHub Actions in the repo's main branch counts"), but not required
-for the proof's mathematical validity.
-
-The current `Blake3Signer` is sufficient for non-production
-demonstrations; production-FedRAMP-High deployments will require this
-upgrade before going live.
+4. Migration to keyless is additive: same wire format, swap the
+   signer's source of identity (OIDC + Fulcio) at deployment time.
