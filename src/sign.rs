@@ -55,52 +55,105 @@ impl Blake3Signer {
     }
 }
 
-/// **SCAFFOLD** — Sigstore/cosign signer. Holds a configuration; the
-/// `sign()` impl is a placeholder until full sigstore-rs integration
-/// lands. The trait is implemented so callers can already use the
-/// type behind `Box<dyn Signer>`; production deployments must NOT use
-/// this in its current form.
+/// Real Ed25519 signer — the same primitive Sigstore/cosign use under
+/// the hood. Asymmetric: the signer holds a private key, verifiers
+/// hold the matching public key. Cartorio (v0.4+) does cryptographic
+/// verification when its `verifier.ed25519_publisher_keys` policy is
+/// set for the org.
 ///
-/// Upgrade path (Phase B):
-///   - Replace placeholder body with `sigstore::cosign::Client::sign`
-///   - Identity from Fulcio cert (`cosign sign --identity-token`)
-///   - Transparency log entry submitted to Rekor
-///   - Verification side: `sigstore::cosign::Client::verify` against
-///     the chosen verifier policy (Fulcio root + Rekor log proof)
+/// This is the *cryptographic* foundation for cosign. The remaining
+/// piece for full Sigstore is the **OIDC + Fulcio + Rekor** flow that
+/// transforms an OIDC identity token into a short-lived signing cert
+/// and records the signature in the public transparency log. That
+/// flow requires production infra (Fulcio service URL, Rekor URL,
+/// OIDC issuer); see `docs/COSIGN-PLAN.md` for the upgrade procedure.
 ///
-/// The `SignedRoot.signature` field becomes the cosign signature
-/// bytes (hex-encoded); `signer_id` becomes the Fulcio cert
-/// identity (e.g. `oidc:github://repo:org/repo@ref:refs/heads/main`).
-pub struct CosignSigner {
-    pub fulcio_url: String,
-    pub rekor_url: String,
-    pub identity_token_oidc_issuer: String,
+/// The signature payload is the `Blake3Hash` of the state-leaf root
+/// (32 bytes) — the same message Sigstore would sign. Once
+/// sigstore-rs is integrated, the signature wire format stays
+/// identical, so cartorio v0.4's Ed25519 verification path keeps
+/// working.
+pub struct Ed25519Signer {
+    signing_key: ed25519_dalek::SigningKey,
 }
 
-impl CosignSigner {
+impl Ed25519Signer {
+    /// Generate a new keypair using OS randomness. Caller must persist
+    /// `verifying_key()` for verifiers and the private key
+    /// (`to_bytes()`) for the signer's keystore.
+    #[must_use]
+    pub fn generate() -> Self {
+        let mut rng = rand::rngs::OsRng;
+        Self {
+            signing_key: ed25519_dalek::SigningKey::generate(&mut rng),
+        }
+    }
+
+    /// Load from 32 raw private-key bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self {
+            signing_key: ed25519_dalek::SigningKey::from_bytes(bytes),
+        }
+    }
+
+    /// Load from a 64-hex-char string.
+    ///
     /// # Errors
-    /// Currently always returns `Err` — this is a scaffold.
-    pub fn new(_fulcio_url: String, _rekor_url: String, _oidc_issuer: String) -> Result<Self> {
-        Err(TabeliaoError::InvalidInput(
-            "CosignSigner is a scaffold; full Sigstore integration is not yet implemented. \
-             Use Blake3Signer for v0.3.x and track the sigstore-rs upgrade in tabeliao/docs/COSIGN-PLAN.md."
-                .into(),
-        ))
+    /// Fails if the string is not 64 hex chars.
+    pub fn from_hex(hex_str: &str) -> Result<Self> {
+        if hex_str.len() != 64 {
+            return Err(TabeliaoError::InvalidInput(format!(
+                "Ed25519 private key must be 64 hex chars, got {}",
+                hex_str.len()
+            )));
+        }
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| TabeliaoError::InvalidInput(format!("hex decode: {e}")))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| TabeliaoError::InvalidInput("private key not 32 bytes".into()))?;
+        Ok(Self::from_bytes(&arr))
+    }
+
+    /// Get the verifying (public) key as 32 bytes. Distribute this to
+    /// verifiers; cartorio's `verify_ed25519_signed_root` consumes it.
+    #[must_use]
+    pub fn verifying_key_bytes(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Get the verifying key as a 64-hex-char string.
+    #[must_use]
+    pub fn verifying_key_hex(&self) -> String {
+        hex::encode(self.verifying_key_bytes())
     }
 }
 
-impl Signer for CosignSigner {
+impl Signer for Ed25519Signer {
     fn sign(
         &self,
-        _root: &Blake3Hash,
-        _signer_id: &str,
-        _signed_at: DateTime<Utc>,
+        root: &Blake3Hash,
+        signer_id: &str,
+        signed_at: DateTime<Utc>,
     ) -> Result<SignedRoot> {
-        Err(TabeliaoError::InvalidInput(
-            "CosignSigner.sign is a scaffold; not implemented".into(),
-        ))
+        use ed25519_dalek::Signer as _;
+        let sig = self.signing_key.sign(&root.0);
+        Ok(SignedRoot {
+            root: root.clone(),
+            signature: hex::encode(sig.to_bytes()),
+            algorithm: SigningAlgorithm::Ed25519,
+            signer_id: signer_id.to_string(),
+            signed_at,
+        })
     }
 }
+
+/// Alias preserved for caller compatibility — `CosignSigner` IS
+/// `Ed25519Signer` in v0.4. When the full Sigstore (Fulcio + Rekor)
+/// flow lands, this alias can become a wrapper that calls Sigstore
+/// while keeping the same trait surface.
+pub type CosignSigner = Ed25519Signer;
 
 impl Signer for Blake3Signer {
     fn sign(
@@ -117,6 +170,92 @@ impl Signer for Blake3Signer {
             signer_id: signer_id.to_string(),
             signed_at,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::similar_names)]
+mod ed25519_tests {
+    use super::*;
+    use cartorio::core::types::SigningAlgorithm;
+    use cartorio::merkle::{verify_ed25519_signed_root, verify_signed_root_shape};
+
+    #[test]
+    fn ed25519_round_trip_sign_then_verify() {
+        let signer = Ed25519Signer::generate();
+        let pk = signer.verifying_key_bytes();
+        let now = Utc::now();
+        let root = Blake3Hash::digest(b"some-state-leaf-root");
+        let signed = signer.sign(&root, "publisher:alice@pleme.io", now).unwrap();
+
+        // Wire-shape check (cartorio's first-line validation).
+        verify_signed_root_shape(&signed).unwrap();
+        // Cryptographic verify.
+        verify_ed25519_signed_root(&signed, &pk).unwrap();
+    }
+
+    #[test]
+    fn ed25519_signature_is_128_hex_chars() {
+        let signer = Ed25519Signer::generate();
+        let signed = signer.sign(&Blake3Hash::digest(b"x"), "p", Utc::now()).unwrap();
+        assert_eq!(signed.signature.len(), 128);
+        assert!(signed.signature.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(signed.algorithm, SigningAlgorithm::Ed25519);
+    }
+
+    #[test]
+    fn ed25519_verify_fails_under_wrong_public_key() {
+        let signer = Ed25519Signer::generate();
+        let other = Ed25519Signer::generate();
+        let signed = signer
+            .sign(&Blake3Hash::digest(b"x"), "p", Utc::now())
+            .unwrap();
+        assert!(verify_ed25519_signed_root(&signed, &other.verifying_key_bytes()).is_err());
+    }
+
+    #[test]
+    fn ed25519_verify_fails_when_root_is_tampered() {
+        let signer = Ed25519Signer::generate();
+        let pk = signer.verifying_key_bytes();
+        let mut signed = signer
+            .sign(&Blake3Hash::digest(b"original"), "p", Utc::now())
+            .unwrap();
+        // Swap the root field — signature was over the original.
+        signed.root = Blake3Hash::digest(b"tampered");
+        assert!(verify_ed25519_signed_root(&signed, &pk).is_err());
+    }
+
+    #[test]
+    fn ed25519_verify_fails_when_signature_is_tampered() {
+        let signer = Ed25519Signer::generate();
+        let pk = signer.verifying_key_bytes();
+        let mut signed = signer
+            .sign(&Blake3Hash::digest(b"x"), "p", Utc::now())
+            .unwrap();
+        // Flip a bit in the signature.
+        let mut sig_bytes = hex::decode(&signed.signature).unwrap();
+        sig_bytes[0] ^= 1;
+        signed.signature = hex::encode(sig_bytes);
+        assert!(verify_ed25519_signed_root(&signed, &pk).is_err());
+    }
+
+    #[test]
+    fn ed25519_signer_from_hex_round_trip_yields_same_public_key() {
+        let s1 = Ed25519Signer::generate();
+        let priv_hex = hex::encode(s1.signing_key.to_bytes());
+        let s2 = Ed25519Signer::from_hex(&priv_hex).unwrap();
+        assert_eq!(s1.verifying_key_bytes(), s2.verifying_key_bytes());
+    }
+
+    #[test]
+    fn ed25519_signer_from_hex_rejects_short_key() {
+        assert!(Ed25519Signer::from_hex("abc").is_err());
+    }
+
+    #[test]
+    fn cosign_signer_alias_is_ed25519() {
+        // Validate the public alias works.
+        let _signer: CosignSigner = Ed25519Signer::generate();
     }
 }
 

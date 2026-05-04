@@ -2,7 +2,7 @@
 //! digest + signer.
 
 use cartorio::core::types::{
-    AdmitArtifactInput, ArtifactStatus, ModifierIdentity,
+    AdmitArtifactInput, ArtifactStatus, ComplianceRun, ModifierIdentity,
 };
 use cartorio::merkle::compose_state_leaf_root;
 use chrono::{DateTime, Utc};
@@ -11,7 +11,22 @@ use crate::attestations::AttestationsConfig;
 use crate::error::Result;
 use crate::sign::Signer;
 
-/// Build a fully-signed `AdmitArtifactInput`.
+/// Build a fully-signed `AdmitArtifactInput` with optional per-test
+/// compliance run.
+///
+/// # Errors
+/// Propagates signer errors (bad key, etc.).
+pub fn build_admit_input_with_run<S: Signer>(
+    cfg: AttestationsConfig,
+    manifest_digest: &str,
+    signed_at: DateTime<Utc>,
+    signer: &S,
+    compliance_run: Option<ComplianceRun>,
+) -> Result<AdmitArtifactInput> {
+    build_admit_input_inner(cfg, manifest_digest, signed_at, signer, compliance_run)
+}
+
+/// Build a fully-signed `AdmitArtifactInput` (no compliance run).
 ///
 /// # Errors
 /// Propagates signer errors (bad key, etc.).
@@ -20,6 +35,16 @@ pub fn build_admit_input<S: Signer>(
     manifest_digest: &str,
     signed_at: DateTime<Utc>,
     signer: &S,
+) -> Result<AdmitArtifactInput> {
+    build_admit_input_inner(cfg, manifest_digest, signed_at, signer, None)
+}
+
+fn build_admit_input_inner<S: Signer>(
+    cfg: AttestationsConfig,
+    manifest_digest: &str,
+    signed_at: DateTime<Utc>,
+    signer: &S,
+    compliance_run: Option<ComplianceRun>,
 ) -> Result<AdmitArtifactInput> {
     let kind = cfg.kind;
     let name = cfg.name.clone();
@@ -55,6 +80,7 @@ pub fn build_admit_input<S: Signer>(
         attestation: chain,
         admitted_at: signed_at,
         signed_root,
+        compliance_run,
     })
 }
 
