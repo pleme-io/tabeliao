@@ -1,6 +1,6 @@
 [package]
 name = "tabeliao"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["Pleme Team <team@pleme.io>"]
@@ -20,6 +20,7 @@ path = "src/main.rs"
 cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.4.1" }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
+base64 = "0.22"
 provas = { git = "https://github.com/pleme-io/provas", tag = "v0.3.0" }
 tameshi = "0.1"
 tokio = { version = "1.50", features = ["full"] }

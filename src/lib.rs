@@ -24,6 +24,7 @@
 pub mod admit;
 pub mod attestations;
 pub mod compliance;
+pub mod cosign;
 pub mod error;
 pub mod publish;
 pub mod sign;

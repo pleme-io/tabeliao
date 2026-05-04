@@ -19,14 +19,17 @@ use axum::{Router, extract::Request, response::Response, routing::any};
 use cartorio::{
     api::router as cartorio_router,
     config::RegistryConfig,
-    core::types::{ArtifactKind, ArtifactStatus, ComplianceStatus},
+    core::types::{
+        ArtifactKind, ArtifactStatus, ComplianceRun, ComplianceStatus, TestOutcome, TestRun,
+    },
+    merkle::verify_ed25519_signed_root,
     state::AppState as CartorioAppState,
 };
 use provas::{BundleMember, Runner, Target};
 use tabeliao::{
     AttestationsConfig,
     attestations::{AttestationsBlock, BuildBlock, ComplianceBlock, ImageBlock, SourceBlock},
-    sign::Blake3Signer,
+    sign::Ed25519Signer,
 };
 use tameshi::hash::Blake3Hash;
 
@@ -164,7 +167,10 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
     let (cartorio_url, cartorio_state) = spawn_cartorio().await;
     let (_backend_url, _backend) = spawn_mock_backend().await;
 
-    let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
+    // Real Ed25519 signer (the same primitive Sigstore/cosign use).
+    let signer = Ed25519Signer::generate();
+    let publisher_pub_key = signer.verifying_key_bytes();
+    eprintln!("Publisher Ed25519 public key: {}", signer.verifying_key_hex());
     let client = reqwest::Client::new();
 
     // ─── 1. Run image pack v2 against the representative image manifest ──
@@ -195,8 +201,8 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
     eprintln!("✓ REAL lareira-openclaw-pki chart: {} tests pass", helm_pack.tests.len());
     eprintln!("  helm pack_hash = {}", helm_pack_hash.to_hex());
 
-    // ─── 3. Admit image to cartorio ──
-    eprintln!("\n=== Step 3: admit image to cartorio ===");
+    // ─── 3. Admit image to cartorio (with per-test compliance run) ──
+    eprintln!("\n=== Step 3: admit image to cartorio (Ed25519 signed + compliance_run) ===");
     let image_digest = tabeliao::publish::manifest_digest(REPRESENTATIVE_OPENCLAW_PKI_IMAGE_MANIFEST);
     let mut image_cfg = cfg_for(ArtifactKind::OciImage, "openclaw-publisher-pki", "0.1.0");
     image_cfg.attestation.compliance = Some(ComplianceBlock {
@@ -206,11 +212,40 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
         result_hash: image_pack_hash.clone(),
         status: ComplianceStatus::Compliant,
     });
-    let image_admit = tabeliao::admit::build_admit_input(
+
+    // Re-run image pack to get per-test outcomes for cartorio storage.
+    let image_target_for_run =
+        Target::from_oci_manifest_bytes(REPRESENTATIVE_OPENCLAW_PKI_IMAGE_MANIFEST.to_vec());
+    let image_run = Runner::run_pack(&image_pack, &image_target_for_run);
+    let image_compliance_run = ComplianceRun {
+        pack_id: image_pack.id.clone(),
+        pack_version: image_pack.version.clone(),
+        runs: image_run
+            .runs
+            .iter()
+            .map(|r| TestRun {
+                test_id: r.test_id.clone(),
+                test_version: r.test_version.clone(),
+                outcome: match &r.outcome {
+                    provas::TestOutcome::Pass { evidence } => TestOutcome::Pass {
+                        evidence: evidence.clone(),
+                    },
+                    provas::TestOutcome::Fail { reason } => TestOutcome::Fail {
+                        reason: reason.clone(),
+                    },
+                },
+            })
+            .collect(),
+        pack_hash: image_run.pack_hash.clone(),
+        recorded_at: chrono::Utc::now(),
+    };
+
+    let image_admit = tabeliao::admit::build_admit_input_with_run(
         image_cfg,
         &image_digest,
         chrono::Utc::now(),
         &signer,
+        Some(image_compliance_run.clone()),
     ).unwrap();
     let resp = client
         .post(format!("{cartorio_url}/api/v1/artifacts"))
@@ -238,11 +273,46 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
         result_hash: helm_pack_hash.clone(),
         status: ComplianceStatus::Compliant,
     });
-    let chart_admit = tabeliao::admit::build_admit_input(
+    // Re-run helm pack for per-test outcomes.
+    let mut chart_tmpl_for_run: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    chart_tmpl_for_run.insert("_validate.tpl".into(), b"// renders pleme-microservice".to_vec());
+    chart_tmpl_for_run.insert("NOTES.txt".into(), b"openclaw pki deployed".to_vec());
+    chart_tmpl_for_run.insert("deployment.yaml".into(), b"# rendered via subchart".to_vec());
+    let chart_target_for_run = Target::from_helm_chart_sources(
+        REAL_LAREIRA_OPENCLAW_PKI_CHART_YAML,
+        REAL_LAREIRA_OPENCLAW_PKI_VALUES_YAML,
+        chart_tmpl_for_run,
+    ).unwrap();
+    let chart_run = Runner::run_pack(&helm_pack, &chart_target_for_run);
+    let chart_compliance_run = ComplianceRun {
+        pack_id: helm_pack.id.clone(),
+        pack_version: helm_pack.version.clone(),
+        runs: chart_run
+            .runs
+            .iter()
+            .map(|r| TestRun {
+                test_id: r.test_id.clone(),
+                test_version: r.test_version.clone(),
+                outcome: match &r.outcome {
+                    provas::TestOutcome::Pass { evidence } => TestOutcome::Pass {
+                        evidence: evidence.clone(),
+                    },
+                    provas::TestOutcome::Fail { reason } => TestOutcome::Fail {
+                        reason: reason.clone(),
+                    },
+                },
+            })
+            .collect(),
+        pack_hash: chart_run.pack_hash.clone(),
+        recorded_at: chrono::Utc::now(),
+    };
+
+    let chart_admit = tabeliao::admit::build_admit_input_with_run(
         chart_cfg,
         &chart_digest,
         chrono::Utc::now(),
         &signer,
+        Some(chart_compliance_run.clone()),
     ).unwrap();
     let resp = client
         .post(format!("{cartorio_url}/api/v1/artifacts"))
@@ -301,11 +371,39 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
             }),
         },
     };
-    let bundle_admit = tabeliao::admit::build_admit_input(
+    // Bundle compliance_run carries the per-test outcomes from the
+    // bundle pack run.
+    let bundle_target_for_run = Target::from_bundle_members(members.clone());
+    let bundle_run = Runner::run_pack(&bundle_pack, &bundle_target_for_run);
+    let bundle_compliance_run = ComplianceRun {
+        pack_id: bundle_pack.id.clone(),
+        pack_version: bundle_pack.version.clone(),
+        runs: bundle_run
+            .runs
+            .iter()
+            .map(|r| TestRun {
+                test_id: r.test_id.clone(),
+                test_version: r.test_version.clone(),
+                outcome: match &r.outcome {
+                    provas::TestOutcome::Pass { evidence } => TestOutcome::Pass {
+                        evidence: evidence.clone(),
+                    },
+                    provas::TestOutcome::Fail { reason } => TestOutcome::Fail {
+                        reason: reason.clone(),
+                    },
+                },
+            })
+            .collect(),
+        pack_hash: bundle_run.pack_hash.clone(),
+        recorded_at: chrono::Utc::now(),
+    };
+
+    let bundle_admit = tabeliao::admit::build_admit_input_with_run(
         bundle_cfg,
         &bundle_digest,
         chrono::Utc::now(),
         &signer,
+        Some(bundle_compliance_run.clone()),
     ).unwrap();
     let resp = client
         .post(format!("{cartorio_url}/api/v1/artifacts"))
@@ -317,12 +415,23 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
     eprintln!("✓ openclaw-bundle@0.1.0 admitted to cartorio (digest={bundle_digest})");
 
     // ─── 6. INDEPENDENT VERIFIER PROCEDURE ──
-    // Anyone with the public pack code + artifact bytes runs this.
+    // Anyone with the public pack code + artifact bytes + publisher's
+    // public key runs this.
     eprintln!("\n=== Step 6: independent verifier procedure ===");
 
     let img_live = cartorio_state.store.get_artifact_by_digest(&image_digest).await.unwrap();
     let chart_live = cartorio_state.store.get_artifact_by_digest(&chart_digest).await.unwrap();
     let bundle_live = cartorio_state.store.get_artifact_by_digest(&bundle_digest).await.unwrap();
+
+    // (0) Cryptographic verification of all three signed_roots against
+    //     the publisher's public key. Real Ed25519, not shape-only.
+    verify_ed25519_signed_root(&img_live.signed_root, &publisher_pub_key)
+        .expect("image signed_root must verify under publisher Ed25519 public key");
+    verify_ed25519_signed_root(&chart_live.signed_root, &publisher_pub_key)
+        .expect("chart signed_root must verify under publisher Ed25519 public key");
+    verify_ed25519_signed_root(&bundle_live.signed_root, &publisher_pub_key)
+        .expect("bundle signed_root must verify under publisher Ed25519 public key");
+    eprintln!("✓ all three signed_roots verify under publisher Ed25519 public key");
 
     assert_eq!(img_live.kind, ArtifactKind::OciImage);
     assert_eq!(chart_live.kind, ArtifactKind::HelmChart);
@@ -382,12 +491,49 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
     );
     eprintln!("✓ bundle pack_hash recomputation matches cartorio");
 
+    // (e) Fetch per-test outcomes via the /compliance-runs endpoint
+    //     and verify they match what we submitted. This is the
+    //     auditor convenience path — no need to re-run the pack to
+    //     learn which specific tests passed.
+    eprintln!("\n=== Step 7: fetch per-test outcomes via /compliance-runs ===");
+    for (artifact_id, expected_pack_id, expected_count) in [
+        (img_live.id.clone(), "fedramp-high-openclaw-image", 13),
+        (chart_live.id.clone(), "fedramp-high-openclaw-helm-content", 16),
+        (bundle_live.id.clone(), "fedramp-high-openclaw-bundle", 4),
+    ] {
+        let runs_url = format!(
+            "{cartorio_url}/api/v1/artifacts/{artifact_id}/compliance-runs"
+        );
+        let resp: serde_json::Value = client.get(&runs_url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(resp["artifact_id"].as_str().unwrap(), artifact_id);
+        let run = &resp["run"];
+        assert_eq!(run["pack_id"].as_str().unwrap(), expected_pack_id);
+        let runs = run["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), expected_count, "{artifact_id} expected {expected_count} test runs");
+        // Every run must be Pass.
+        for r in runs {
+            let outcome = &r["outcome"];
+            assert!(
+                outcome.get("pass").is_some(),
+                "test {} did not pass: {outcome}",
+                r["test_id"].as_str().unwrap()
+            );
+        }
+    }
+    eprintln!("✓ per-test outcomes fetched + every test confirmed Pass for all 3 artifacts");
+
     eprintln!();
     eprintln!("════════════════════════════════════════════════════════════════════");
-    eprintln!(" PROOF VERIFIED");
+    eprintln!(" PROOF VERIFIED — full crypto, per-test, real-chart");
     eprintln!();
     eprintln!(" openclaw v0.1.0 (image + chart together) is provably FedRAMP-High");
     eprintln!(" compliant under fedramp-high-openclaw-bundle@1.");
+    eprintln!();
+    eprintln!(" Independent verification chain:");
+    eprintln!("   1. Ed25519 signed_root verified under publisher public key (×3 artifacts)");
+    eprintln!("   2. pack_hash recomputed from public packs against artifact bytes (×3 packs)");
+    eprintln!("   3. Per-test outcomes fetched + all confirmed Pass (×33 individual tests)");
+    eprintln!("   4. Bundle proof composes member proofs deterministically (×4 bundle tests)");
     eprintln!();
     eprintln!(" Artifacts:");
     eprintln!("   image:  openclaw-publisher-pki@0.1.0   ({})", image_digest);
