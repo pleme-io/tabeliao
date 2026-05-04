@@ -597,6 +597,288 @@ async fn unknown_pack_name_aborts_publish_at_input_validation() {
     assert!(err.to_string().contains("unknown compliance pack"));
 }
 
+// ─── headline: bundle proof for openclaw image+chart together ───────
+
+const FRAMP_COMPLIANT_HELM_MANIFEST: &[u8] = br#"{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.cncf.helm.config.v1+json",
+    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "size": 200
+  },
+  "layers": [
+    {"mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "size": 5000}
+  ]
+}"#;
+
+fn cfg_for_helm(name: &str, version: &str) -> AttestationsConfig {
+    let mut c = cfg_for(name, version);
+    c.kind = ArtifactKind::HelmChart;
+    // HelmChart's required pillars are [Source, Build, Compliance] —
+    // image pillar is omitted.
+    c.attestation.image = None;
+    c
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn provable_statement_openclaw_bundle_is_fedramp_high() {
+    // The headline. Three artifacts in cartorio:
+    //   1. openclaw-image v1.2.3 — kind=OciImage, image pack_hash
+    //   2. openclaw-chart v1.2.3 — kind=HelmChart, helm pack_hash
+    //   3. openclaw-bundle v1.2.3 — kind=Bundle, bundle pack_hash
+    //
+    // The bundle pack_hash is the deterministic output of running
+    // fedramp-high-openclaw-bundle@1 against a Bundle{members=[image,
+    // chart]} where each member carries its own pack_hash.
+    //
+    // An independent verifier:
+    //   a. fetches all three from cartorio by-digest
+    //   b. re-runs each member pack against its bytes; confirms hashes
+    //   c. constructs the bundle target from the published members
+    //   d. re-runs the bundle pack; confirms the bundle pack_hash
+    //
+    // If all four match, "openclaw bundle v1.2.3 is FedRAMP-High" is
+    // provably true under fedramp-high-openclaw-bundle@1.
+
+    let (backend_url, _backend) = spawn_mock_backend().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
+    let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
+
+    // ── Step 1: publish image with image pack ───────────────────────
+    let image_plan = PublishPlan {
+        cartorio_url: cartorio_url.clone(),
+        lacre_url: lacre_url.clone(),
+        image_path: "myorg/openclaw-image".into(),
+        reference: "v1.2.3".into(),
+        manifest_bytes: FRAMP_COMPLIANT_MANIFEST.to_vec(),
+        manifest_content_type: "application/vnd.oci.image.manifest.v1+json".into(),
+        compliance_pack_name: Some("fedramp-high-openclaw-image@1".into()),
+    };
+    let image_outcome = publish(cfg_for("openclaw-image", "1.2.3"), image_plan, &signer)
+        .await
+        .unwrap();
+
+    // ── Step 2: publish helm chart with helm pack ──────────────────
+    // The helm path doesn't go through tabeliao::publish (which uses
+    // the OCI image pack); we admit directly with the helm pack hash.
+    let helm_pack = tabeliao::compliance::pack_by_name("fedramp-high-openclaw-helm@1").unwrap();
+    let helm_pack_hash = tabeliao::compliance::enforce_helm_pack(&helm_pack, FRAMP_COMPLIANT_HELM_MANIFEST)
+        .expect("helm pack must pass for compliant chart");
+    let helm_digest = tabeliao::publish::manifest_digest(FRAMP_COMPLIANT_HELM_MANIFEST);
+
+    // Build the chart's admit input directly (helm requires kind=HelmChart).
+    let mut chart_cfg = cfg_for_helm("openclaw-chart", "1.2.3");
+    chart_cfg.attestation.compliance = Some(tabeliao::attestations::ComplianceBlock {
+        framework: "FedRAMP".into(),
+        baseline: "high".into(),
+        profile: "fedramp-high-openclaw-helm@1".into(),
+        result_hash: helm_pack_hash.clone(),
+        status: cartorio::core::types::ComplianceStatus::Compliant,
+    });
+    let chart_admit = tabeliao::admit::build_admit_input(
+        chart_cfg,
+        &helm_digest,
+        chrono::Utc::now(),
+        &signer,
+    ).unwrap();
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{cartorio_url}/api/v1/artifacts"))
+        .json(&chart_admit)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "helm chart admit must succeed");
+    let chart_resp: serde_json::Value = resp.json().await.unwrap();
+    let chart_id = chart_resp["id"].as_str().unwrap().to_string();
+
+    // ── Step 3: compute bundle digest + pack_hash, admit bundle ────
+    // The bundle target's image member must carry the IMAGE PACK
+    // HASH — not the state-leaf composed_root. The pack_hash is
+    // what cartorio stores as compliance.result_hash, which is the
+    // same value tabeliao::publish bakes into the attestation.
+    let image_pack_for_member = tabeliao::compliance::pack_by_name("fedramp-high-openclaw-image@1").unwrap();
+    let image_pack_hash_for_member =
+        tabeliao::compliance::enforce_pack(&image_pack_for_member, FRAMP_COMPLIANT_MANIFEST)
+            .expect("image pack hash must be derivable");
+    use provas::{BundleMember, Runner, Target, fedramp_high_openclaw_bundle_v1};
+    let members = vec![
+        BundleMember {
+            digest: image_outcome.digest.clone(),
+            kind: "oci-image".into(),
+            pack_hash: image_pack_hash_for_member,
+        },
+        BundleMember {
+            digest: helm_digest.clone(),
+            kind: "helm-chart".into(),
+            pack_hash: helm_pack_hash.clone(),
+        },
+    ];
+    // Bundle's "digest" is blake3(sorted member digests) — content-
+    // addressing the bundle by its members.
+    let mut sorted_digests: Vec<String> = members.iter().map(|m| m.digest.clone()).collect();
+    sorted_digests.sort();
+    let bundle_digest = format!(
+        "sha256:{}",
+        hex::encode(blake3::hash(sorted_digests.join("\n").as_bytes()).as_bytes())
+    );
+
+    let bundle_pack = fedramp_high_openclaw_bundle_v1();
+    let bundle_pack_hash = tabeliao::compliance::enforce_bundle_pack(&bundle_pack, members.clone())
+        .expect("bundle pack must pass for compliant members");
+
+    // Admit bundle to cartorio (kind=Bundle has only Compliance pillar required).
+    let bundle_cfg = AttestationsConfig {
+        kind: ArtifactKind::Bundle,
+        name: "openclaw-bundle".into(),
+        version: "1.2.3".into(),
+        publisher_id: "alice@pleme.io".into(),
+        org: ORG.into(),
+        attestation: tabeliao::attestations::AttestationsBlock {
+            source: None,
+            build: None,
+            image: None,
+            compliance: Some(tabeliao::attestations::ComplianceBlock {
+                framework: "FedRAMP".into(),
+                baseline: "high".into(),
+                profile: "fedramp-high-openclaw-bundle@1".into(),
+                result_hash: bundle_pack_hash.clone(),
+                status: cartorio::core::types::ComplianceStatus::Compliant,
+            }),
+        },
+    };
+    let bundle_admit = tabeliao::admit::build_admit_input(
+        bundle_cfg,
+        &bundle_digest,
+        chrono::Utc::now(),
+        &signer,
+    ).unwrap();
+    let resp = client
+        .post(format!("{cartorio_url}/api/v1/artifacts"))
+        .json(&bundle_admit)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "bundle admit must succeed");
+    let bundle_resp: serde_json::Value = resp.json().await.unwrap();
+    let bundle_id = bundle_resp["id"].as_str().unwrap().to_string();
+
+    // ── Step 4: independent verifier procedure ─────────────────────
+    // (a) Find all three artifacts in cartorio.
+    let img_live = cartorio_state
+        .store
+        .get_artifact_by_digest(&image_outcome.digest)
+        .await
+        .expect("image must be admitted");
+    let chart_live = cartorio_state
+        .store
+        .get_artifact_by_digest(&helm_digest)
+        .await
+        .expect("chart must be admitted");
+    let bundle_live = cartorio_state
+        .store
+        .get_artifact_by_digest(&bundle_digest)
+        .await
+        .expect("bundle must be admitted");
+
+    assert_eq!(img_live.id, image_outcome.artifact_id);
+    assert_eq!(chart_live.id, chart_id);
+    assert_eq!(bundle_live.id, bundle_id);
+    assert_eq!(bundle_live.kind, ArtifactKind::Bundle);
+    assert_eq!(bundle_live.status, cartorio::core::types::ArtifactStatus::Active);
+
+    // (b) Re-run member packs against their bytes; confirm hashes match.
+    let image_pack = tabeliao::compliance::pack_by_name("fedramp-high-openclaw-image@1").unwrap();
+    let img_target = Target::from_oci_manifest_bytes(FRAMP_COMPLIANT_MANIFEST.to_vec());
+    let img_recomputed = Runner::run_pack(&image_pack, &img_target);
+    assert!(img_recomputed.all_passed);
+    assert_eq!(
+        img_recomputed.pack_hash,
+        img_live.attestation.compliance.as_ref().unwrap().result_hash,
+        "image pack_hash recomputation must match cartorio-stored result_hash"
+    );
+
+    let chart_target = Target::from_helm_manifest_bytes(FRAMP_COMPLIANT_HELM_MANIFEST.to_vec());
+    let chart_recomputed = Runner::run_pack(&helm_pack, &chart_target);
+    assert!(chart_recomputed.all_passed);
+    assert_eq!(
+        chart_recomputed.pack_hash,
+        chart_live.attestation.compliance.as_ref().unwrap().result_hash,
+        "helm pack_hash recomputation must match cartorio-stored result_hash"
+    );
+
+    // (c) Reconstruct the bundle target from the published members'
+    // public fields. Anyone can do this from cartorio's public API.
+    let reconstructed_members = vec![
+        BundleMember {
+            digest: img_live.digest.clone(),
+            kind: img_live.kind.name().to_string(),
+            pack_hash: img_live.attestation.compliance.as_ref().unwrap().result_hash.clone(),
+        },
+        BundleMember {
+            digest: chart_live.digest.clone(),
+            kind: chart_live.kind.name().to_string(),
+            pack_hash: chart_live.attestation.compliance.as_ref().unwrap().result_hash.clone(),
+        },
+    ];
+    let reconstructed_target = Target::from_bundle_members(reconstructed_members);
+    let bundle_recomputed = Runner::run_pack(&bundle_pack, &reconstructed_target);
+
+    // (d) Verify bundle pack_hash matches.
+    assert!(bundle_recomputed.all_passed);
+    assert_eq!(
+        bundle_recomputed.pack_hash,
+        bundle_live.attestation.compliance.as_ref().unwrap().result_hash,
+        "bundle pack_hash recomputation must match cartorio-stored result_hash"
+    );
+
+    // QED: openclaw bundle v1.2.3 is provably FedRAMP-High under
+    // fedramp-high-openclaw-bundle@1, with its proof transitively
+    // linking to the member proofs.
+}
+
+#[tokio::test]
+async fn bundle_proof_breaks_when_a_member_is_swapped() {
+    // If an attacker tries to claim a bundle composes (X, Y) but
+    // actually composes (X, Y'), the bundle's recorded pack_hash will
+    // not match what a verifier reconstructs from (X, Y).
+    use provas::{BundleMember, Runner, Target, fedramp_high_openclaw_bundle_v1};
+    let pack = fedramp_high_openclaw_bundle_v1();
+    let real = Target::from_bundle_members(vec![
+        BundleMember {
+            digest: "sha256:image-X".into(),
+            kind: "oci-image".into(),
+            pack_hash: tameshi::hash::Blake3Hash::digest(b"img-X-pack"),
+        },
+        BundleMember {
+            digest: "sha256:chart-Y".into(),
+            kind: "helm-chart".into(),
+            pack_hash: tameshi::hash::Blake3Hash::digest(b"chart-Y-pack"),
+        },
+    ]);
+    let swapped = Target::from_bundle_members(vec![
+        BundleMember {
+            digest: "sha256:image-X".into(),
+            kind: "oci-image".into(),
+            pack_hash: tameshi::hash::Blake3Hash::digest(b"img-X-pack"),
+        },
+        BundleMember {
+            digest: "sha256:chart-EVIL".into(), // swapped
+            kind: "helm-chart".into(),
+            pack_hash: tameshi::hash::Blake3Hash::digest(b"chart-EVIL-pack"),
+        },
+    ]);
+    let real_hash = Runner::run_pack(&pack, &real).pack_hash;
+    let swapped_hash = Runner::run_pack(&pack, &swapped).pack_hash;
+    assert_ne!(
+        real_hash, swapped_hash,
+        "swapping a bundle member MUST yield a different bundle pack_hash; otherwise the bundle proof is forgeable"
+    );
+}
+
 #[tokio::test]
 async fn publish_to_unreachable_cartorio_returns_network_error() {
     let (backend_url, _backend) = spawn_mock_backend().await;

@@ -4,7 +4,10 @@
 //! tree carries an attested claim that's transferably re-derivable.
 
 use cartorio::core::types::{ComplianceAttestation, ComplianceStatus};
-use provas::{Pack, Runner, Target, fedramp_high_openclaw_image_v1};
+use provas::{
+    BundleMember, Pack, Runner, Target, fedramp_high_openclaw_bundle_v1,
+    fedramp_high_openclaw_helm_v1, fedramp_high_openclaw_image_v1,
+};
 use tameshi::hash::Blake3Hash;
 
 use crate::error::{Result, TabeliaoError};
@@ -16,22 +19,39 @@ use crate::error::{Result, TabeliaoError};
 pub fn pack_by_name(name: &str) -> Result<Pack> {
     match name {
         "fedramp-high-openclaw-image@1" => Ok(fedramp_high_openclaw_image_v1()),
+        "fedramp-high-openclaw-helm@1" => Ok(fedramp_high_openclaw_helm_v1()),
+        "fedramp-high-openclaw-bundle@1" => Ok(fedramp_high_openclaw_bundle_v1()),
         other => Err(TabeliaoError::InvalidInput(format!(
-            "unknown compliance pack: {other:?}; known: fedramp-high-openclaw-image@1"
+            "unknown compliance pack: {other:?}; known: \
+             fedramp-high-openclaw-image@1, fedramp-high-openclaw-helm@1, \
+             fedramp-high-openclaw-bundle@1"
         ))),
     }
 }
 
-/// Run the pack against the manifest bytes; fail-closed on any test
-/// failure. Returns the result-hash + per-test outcomes.
+/// Run a helm pack against a helm-OCI manifest body.
 ///
 /// # Errors
-/// Returns `Err` if any test fails. The error message lists every
-/// failing test with its reason — the operator sees exactly what's
-/// non-compliant before anything is published.
-pub fn enforce_pack(pack: &Pack, manifest_bytes: &[u8]) -> Result<Blake3Hash> {
-    let target = Target::from_oci_manifest_bytes(manifest_bytes.to_vec());
-    let result = Runner::run_pack(pack, &target);
+/// Returns `Err` if any test fails, with operator-readable reasons.
+pub fn enforce_helm_pack(pack: &Pack, manifest_bytes: &[u8]) -> Result<Blake3Hash> {
+    let target = Target::from_helm_manifest_bytes(manifest_bytes.to_vec());
+    enforce_inner(pack, &target)
+}
+
+/// Run a bundle pack against a list of bundle members. Each member's
+/// `pack_hash` must be the result of running its own pack against its
+/// own target — so the bundle proof transitively depends on each
+/// member's proof.
+///
+/// # Errors
+/// Returns `Err` if any bundle test fails.
+pub fn enforce_bundle_pack(pack: &Pack, members: Vec<BundleMember>) -> Result<Blake3Hash> {
+    let target = Target::from_bundle_members(members);
+    enforce_inner(pack, &target)
+}
+
+fn enforce_inner(pack: &Pack, target: &Target) -> Result<Blake3Hash> {
+    let result = Runner::run_pack(pack, target);
     if !result.all_passed {
         let failures: Vec<String> = result
             .runs
@@ -40,7 +60,7 @@ pub fn enforce_pack(pack: &Pack, manifest_bytes: &[u8]) -> Result<Blake3Hash> {
                 provas::TestOutcome::Fail { reason } => {
                     Some(format!("  - {} (v{}): {reason}", r.test_id, r.test_version))
                 }
-                provas::TestOutcome::Pass => None,
+                provas::TestOutcome::Pass { .. } => None,
             })
             .collect();
         return Err(TabeliaoError::InvalidInput(format!(
@@ -51,6 +71,19 @@ pub fn enforce_pack(pack: &Pack, manifest_bytes: &[u8]) -> Result<Blake3Hash> {
         )));
     }
     Ok(result.pack_hash)
+}
+
+/// Run the pack against an OCI image manifest; fail-closed on any
+/// test failure. Returns the `pack_hash` to embed in
+/// `ComplianceAttestation.result_hash`.
+///
+/// # Errors
+/// Returns `Err` if any test fails. The error message lists every
+/// failing test with its reason — the operator sees exactly what's
+/// non-compliant before anything is published.
+pub fn enforce_pack(pack: &Pack, manifest_bytes: &[u8]) -> Result<Blake3Hash> {
+    let target = Target::from_oci_manifest_bytes(manifest_bytes.to_vec());
+    enforce_inner(pack, &target)
 }
 
 /// Build a `ComplianceAttestation` whose fields exactly describe the
@@ -79,6 +112,21 @@ fn framework_baseline_from_pack_id(pack_id: &str) -> (String, String) {
         ("NIST_800_53".into(), "default".into())
     } else {
         ("CUSTOM".into(), "default".into())
+    }
+}
+
+/// Build a `BundleMember` from a published cartorio artifact's
+/// public fields (digest, kind name, compliance `result_hash`).
+#[must_use]
+pub fn bundle_member_from_artifact_fields(
+    digest: &str,
+    kind_name: &str,
+    member_pack_hash: Blake3Hash,
+) -> BundleMember {
+    BundleMember {
+        digest: digest.to_string(),
+        kind: kind_name.to_string(),
+        pack_hash: member_pack_hash,
     }
 }
 

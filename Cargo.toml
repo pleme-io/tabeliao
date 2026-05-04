@@ -1,6 +1,6 @@
 [package]
 name = "tabeliao"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["Pleme Team <team@pleme.io>"]
@@ -17,7 +17,7 @@ name = "tabeliao"
 path = "src/main.rs"
 
 [dependencies]
-cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.3.2" }
+cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.3.3" }
 provas = { path = "../provas" }
 tameshi = "0.1"
 tokio = { version = "1.50", features = ["full"] }

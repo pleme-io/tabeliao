@@ -227,8 +227,8 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cartorio"
-version = "0.3.2"
-source = "git+https://github.com/pleme-io/cartorio?tag=v0.3.2#53b8c1531b3570bdb1a1abfa66b685e77771f8f0"
+version = "0.3.3"
+source = "git+https://github.com/pleme-io/cartorio?tag=v0.3.3#a8a30d5a878373d5508f5e90193741ecd6cc23dc"
 dependencies = [
  "axum",
  "blake3",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "provas"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "hex",
