@@ -1207,8 +1207,8 @@ dependencies = [
 
 [[package]]
 name = "provas"
-version = "0.3.1"
-source = "git+https://github.com/pleme-io/provas?tag=v0.3.1#588e4905bcfc180803093eb0ed293c7ff0b2d636"
+version = "0.4.0"
+source = "git+https://github.com/pleme-io/provas?tag=v0.4.0#af3ed3d208168c6cc1dbd4a40814c5341b3efcc6"
 dependencies = [
  "blake3",
  "clap",

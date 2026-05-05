@@ -6,8 +6,9 @@
 use cartorio::core::types::{ComplianceAttestation, ComplianceStatus};
 use provas::{
     BundleMember, Pack, Runner, Target, fedramp_high_openclaw_bundle_v1,
-    fedramp_high_openclaw_helm_content_v1, fedramp_high_openclaw_helm_v1,
-    fedramp_high_openclaw_image_v1, fedramp_high_openclaw_image_v2,
+    fedramp_high_openclaw_helm_content_v1, fedramp_high_openclaw_helm_rendered_v1,
+    fedramp_high_openclaw_helm_v1, fedramp_high_openclaw_image_v1,
+    fedramp_high_openclaw_image_v2,
 };
 use tameshi::hash::Blake3Hash;
 
@@ -23,12 +24,13 @@ pub fn pack_by_name(name: &str) -> Result<Pack> {
         "fedramp-high-openclaw-image@2" => Ok(fedramp_high_openclaw_image_v2()),
         "fedramp-high-openclaw-helm@1" => Ok(fedramp_high_openclaw_helm_v1()),
         "fedramp-high-openclaw-helm-content@1" => Ok(fedramp_high_openclaw_helm_content_v1()),
+        "fedramp-high-openclaw-helm-rendered@1" => Ok(fedramp_high_openclaw_helm_rendered_v1()),
         "fedramp-high-openclaw-bundle@1" => Ok(fedramp_high_openclaw_bundle_v1()),
         other => Err(TabeliaoError::InvalidInput(format!(
             "unknown compliance pack: {other:?}; known: \
              fedramp-high-openclaw-image@1, fedramp-high-openclaw-image@2, \
              fedramp-high-openclaw-helm@1, fedramp-high-openclaw-helm-content@1, \
-             fedramp-high-openclaw-bundle@1"
+             fedramp-high-openclaw-helm-rendered@1, fedramp-high-openclaw-bundle@1"
         ))),
     }
 }
