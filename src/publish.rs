@@ -53,7 +53,42 @@ pub async fn publish<S: Signer>(
 
     if let Some(pack_name) = plan.compliance_pack_name.as_deref() {
         let pack = crate::compliance::pack_by_name(pack_name)?;
-        let pack_hash = crate::compliance::enforce_pack(&pack, &plan.manifest_bytes)?;
+        // Dispatch the pack-target shape from the artifact kind. The
+        // CLI used to assume oci-image; that worked for image packs
+        // but silently mis-targeted helm + bundle packs (helm tests
+        // need parsed chart fields; bundle tests need the typed
+        // member list). Now: kind drives target.
+        let pack_hash = match cfg.kind {
+            cartorio::core::types::ArtifactKind::OciImage => {
+                crate::compliance::enforce_pack(&pack, &plan.manifest_bytes)?
+            }
+            cartorio::core::types::ArtifactKind::HelmChart => {
+                crate::compliance::enforce_helm_pack(&pack, &plan.manifest_bytes)?
+            }
+            cartorio::core::types::ArtifactKind::Bundle => {
+                let specs = cfg.bundle_members.as_deref().ok_or_else(|| {
+                    TabeliaoError::InvalidInput(
+                        "kind: bundle requires `bundle_members` in attestations.yaml \
+                         (each entry: digest + kind + pack_hash)"
+                            .into(),
+                    )
+                })?;
+                let members: Vec<provas::BundleMember> = specs
+                    .iter()
+                    .map(|m| provas::BundleMember {
+                        digest: m.digest.clone(),
+                        kind: m.kind.clone(),
+                        pack_hash: m.pack_hash.clone(),
+                    })
+                    .collect();
+                crate::compliance::enforce_bundle_pack(&pack, members)?
+            }
+            other => {
+                return Err(TabeliaoError::InvalidInput(format!(
+                    "kind {other:?} has no pack runner wired in tabeliao yet"
+                )));
+            }
+        };
         let att = crate::compliance::attestation_from_pack(&pack, pack_hash);
         // Splice the pack-derived attestation into the operator-supplied
         // config. Source/build/image pillars are author-supplied;
@@ -67,6 +102,8 @@ pub async fn publish<S: Signer>(
         });
     }
 
+    // Capture before `cfg` is moved into build_admit_input.
+    let is_bundle = matches!(cfg.kind, cartorio::core::types::ArtifactKind::Bundle);
     let input = build_admit_input(cfg, &digest, admitted_at, signer)?;
 
     let client = reqwest::Client::builder()
@@ -78,7 +115,17 @@ pub async fn publish<S: Signer>(
         })?;
 
     let admit_outcome = submit_admit(&client, &plan.cartorio_url, &input).await?;
-    push_manifest(&client, &plan).await?;
+
+    // Bundles are cartorio-only: their "manifest" is a typed
+    // composition over member digests + pack_hashes, not a registry
+    // artifact. Pushing through lacre would forward to a backing OCI
+    // registry that legitimately rejects unknown media types
+    // (HTTP 415). Skip the push for kind=bundle; the receipt lives
+    // in cartorio's merkle ledger and is verifiable without ever
+    // touching a registry.
+    if !is_bundle {
+        push_manifest(&client, &plan).await?;
+    }
 
     Ok(PublishOutcome {
         digest,

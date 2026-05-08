@@ -25,6 +25,25 @@ pub struct AttestationsConfig {
     pub org: String,
     #[serde(default)]
     pub attestation: AttestationsBlock,
+    /// For `kind: bundle` artifacts only: the typed list of member
+    /// (digest, kind, pack_hash) triples. Each entry MUST already be
+    /// admitted to cartorio with that exact `pack_hash`. Bundle pack
+    /// tests verify the member set is non-empty, includes both an
+    /// image and a chart, and that all member pack_hashes are
+    /// non-zero — and the bundle's own `pack_hash` inherits the
+    /// member proofs deterministically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_members: Option<Vec<BundleMemberSpec>>,
+}
+
+/// YAML-authored bundle member entry. Mirrors `provas::BundleMember`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleMemberSpec {
+    pub digest: String,
+    /// One of `oci-image`, `helm-chart`, `skill` — uses the same
+    /// kebab-case as cartorio's `ArtifactKind` serde rename.
+    pub kind: String,
+    pub pack_hash: Blake3Hash,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
