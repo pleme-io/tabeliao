@@ -134,21 +134,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("✗ image  rejected   {} — {}", status.as_u16(), short(&body));
     }
 
-    // ─── T2: chart admission signed by a rogue key ──────────────────
+    // ─── T2: chart admission with a tampered build closure ─────────
     //
-    // A different publisher (different Ed25519 key) attempts to admit
-    // the chart. The body composes correctly, but cartorio's verifier
-    // policy (config.verifier.publisher_keys) does not have this key
-    // in its allow-list, so the signed_root verify step fails.
+    // The publisher built and signed an admission with build closure
+    // hash A. Someone intercepts the body before it reaches cartorio
+    // and replaces closure_hash with B (claiming a different built
+    // artifact, but reusing the original signed_root). Cartorio
+    // recomposes the state-leaf from the body's NEW build block;
+    // since closure_hash feeds compose_state_leaf_root, the
+    // recomposed root no longer matches signed_root.root.
     //
-    // For pleme-dev cartorio runs with an empty publisher_keys list
-    // (back-compat mode — every Ed25519 signature passes shape, no
-    // crypto verify). To reliably show a key-based rejection at
-    // pleme-dev scope we instead target a different rejection: send
-    // the chart body, then DELETE the signature bytes so they fail
-    // the shape check upfront. Effect is the same (chart rejected),
-    // mechanism distinct from T1 (different field, different
-    // cartorio code path).
+    // Distinct from T1 (which mutates compliance.result_hash). T1
+    // models compliance-proof forgery; T2 models build-provenance
+    // forgery. Both trigger the same state-leaf invariant but at
+    // different positions in the leaf composition, demonstrating
+    // that cartorio's tamper-evidence is field-comprehensive.
     {
         let chart_digest = format!(
             "sha256:{}",
@@ -166,9 +166,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Utc::now(),
             &legit_signer,
         )?;
-        // Strip the signature → cartorio rejects on signed_root shape
-        // (signature must be 128 hex chars for ed25519).
-        admit.signed_root.signature = "00".repeat(64);
+        // POST-SIGN tamper — replace build.closure_hash with a
+        // different digest. The signed_root.root no longer matches
+        // the recomposed leaf because compose_state_leaf_root reads
+        // the mutated attestation.build.closure_hash.
+        if let Some(b) = admit.attestation.build.as_mut() {
+            b.closure_hash = Blake3Hash::digest(b"injected-tamper-closure-hash");
+        }
         let resp = client
             .post(format!("{cartorio_url}/api/v1/artifacts"))
             .json(&admit)
@@ -178,8 +182,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let body = resp.text().await.unwrap_or_default();
         if status.is_success() {
             return Err(format!(
-                "T2 (chart bad-signature) NOT REJECTED — got {status}; this is a bug \
-                 in cartorio's signature-shape check.\nbody: {body}"
+                "T2 (chart build-closure tamper) NOT REJECTED — got {status}; this is \
+                 a bug in cartorio's state-leaf invariant.\nbody: {body}"
             )
             .into());
         }
