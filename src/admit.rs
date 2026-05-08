@@ -125,6 +125,7 @@ mod tests {
                     status: ComplianceStatus::Compliant,
                 }),
             },
+            bundle_members: None,
         }
     }
 

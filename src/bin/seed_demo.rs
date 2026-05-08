@@ -19,54 +19,10 @@
 
 use std::env;
 
-use cartorio::core::types::{ArtifactKind, ComplianceStatus};
+use cartorio::core::types::ArtifactKind;
 use chrono::Utc;
-use tabeliao::{
-    AttestationsConfig,
-    attestations::{AttestationsBlock, BuildBlock, ComplianceBlock, ImageBlock, SourceBlock},
-    sign::Ed25519Signer,
-};
+use tabeliao::{demo::artifact_config, sign::Ed25519Signer};
 use tameshi::hash::Blake3Hash;
-
-const ORG: &str = "pleme-io";
-
-fn cfg(kind: ArtifactKind, name: &str, version: &str, profile: &str) -> AttestationsConfig {
-    AttestationsConfig {
-        kind: kind.clone(),
-        name: name.into(),
-        version: version.into(),
-        publisher_id: "demo@pleme.io".into(),
-        org: ORG.into(),
-        attestation: AttestationsBlock {
-            source: Some(SourceBlock {
-                git_commit: "demo-commit-0000000".into(),
-                tree_hash: Blake3Hash::digest(format!("{name}-tree").as_bytes()),
-                flake_lock_hash: Blake3Hash::digest(format!("{name}-lock").as_bytes()),
-            }),
-            build: Some(BuildBlock {
-                closure_hash: Blake3Hash::digest(format!("{name}-closure").as_bytes()),
-                sbom_hash: Blake3Hash::digest(format!("{name}-sbom").as_bytes()),
-                slsa_level: 3,
-            }),
-            image: if matches!(kind, ArtifactKind::OciImage) {
-                Some(ImageBlock {
-                    cosign_signature_ref: format!("ghcr.io/pleme-io/{name}:sig"),
-                    slsa_provenance_ref: format!("ghcr.io/pleme-io/{name}:prov"),
-                })
-            } else {
-                None
-            },
-            compliance: Some(ComplianceBlock {
-                framework: "FedRAMP".into(),
-                baseline: "high".into(),
-                profile: profile.into(),
-                result_hash: Blake3Hash::digest(format!("{name}-pack-hash").as_bytes()),
-                status: ComplianceStatus::Compliant,
-            }),
-        },
-        bundle_members: None,
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -83,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Blake3Hash::digest(b"openclaw-publisher-pki-manifest-bytes").to_hex()
     );
     let image_input = tabeliao::admit::build_admit_input(
-        cfg(
+        artifact_config(
             ArtifactKind::OciImage,
             "openclaw-publisher-pki",
             "0.1.0",
@@ -111,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Blake3Hash::digest(b"lareira-openclaw-pki-chart-bytes").to_hex()
     );
     let chart_input = tabeliao::admit::build_admit_input(
-        cfg(
+        artifact_config(
             ArtifactKind::HelmChart,
             "lareira-openclaw-pki",
             "0.1.0",
@@ -138,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "sha256:{}",
         Blake3Hash::digest(b"openclaw-bundle-v0.1.0").to_hex()
     );
-    let mut bundle_cfg = cfg(
+    let mut bundle_cfg = artifact_config(
         ArtifactKind::Bundle,
         "openclaw",
         "0.1.0",

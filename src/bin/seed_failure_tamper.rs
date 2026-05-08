@@ -1,10 +1,18 @@
 //! seed_failure_tamper — demonstrate the cartorio admission gate's
-//! tamper-rejection by attempting two malformed admissions: an image
-//! whose compliance.result_hash was flipped after signing, and a
-//! helm chart whose signed_root was sealed with a rogue Ed25519
-//! key. Cartorio rejects both with 4xx and writes a record to its
-//! in-memory rejection log; the openclaw-web SPA then renders these
-//! alongside the successful admissions.
+//! tamper-rejection by attempting two malformed admissions:
+//!
+//!   T1 (image)  — `attestation.compliance.result_hash` mutated
+//!                 AFTER the publisher signed the body. Models
+//!                 compliance-proof forgery.
+//!   T2 (chart)  — `attestation.build.closure_hash` mutated AFTER
+//!                 signing. Models build-provenance forgery.
+//!
+//! Both trigger cartorio's state-leaf invariant (signed_root.root
+//! != recomposed leaf) at different field positions, demonstrating
+//! that the tamper-evidence is field-comprehensive. Cartorio
+//! returns 4xx and writes the attempts to its in-memory rejection
+//! log; the openclaw-web SPA renders them alongside the successful
+//! admissions.
 //!
 //! Companion to `seed_demo` — same publisher_id (`demo@pleme.io`),
 //! same Cartorio URL convention. Always runs AFTER seed_demo so the
@@ -21,57 +29,8 @@ use std::env;
 
 use cartorio::core::types::ArtifactKind;
 use chrono::Utc;
-use tabeliao::sign::Ed25519Signer;
+use tabeliao::{demo::artifact_config, sign::Ed25519Signer};
 use tameshi::hash::Blake3Hash;
-
-mod helpers {
-    use cartorio::core::types::{ArtifactKind, ComplianceStatus};
-    use tabeliao::{
-        AttestationsConfig,
-        attestations::{AttestationsBlock, BuildBlock, ComplianceBlock, ImageBlock, SourceBlock},
-    };
-    use tameshi::hash::Blake3Hash;
-
-    pub const ORG: &str = "pleme-io";
-
-    pub fn cfg(kind: ArtifactKind, name: &str, version: &str, profile: &str) -> AttestationsConfig {
-        AttestationsConfig {
-            kind: kind.clone(),
-            name: name.into(),
-            version: version.into(),
-            publisher_id: "demo@pleme.io".into(),
-            org: ORG.into(),
-            attestation: AttestationsBlock {
-                source: Some(SourceBlock {
-                    git_commit: "demo-commit-0000000".into(),
-                    tree_hash: Blake3Hash::digest(format!("{name}-tree").as_bytes()),
-                    flake_lock_hash: Blake3Hash::digest(format!("{name}-lock").as_bytes()),
-                }),
-                build: Some(BuildBlock {
-                    closure_hash: Blake3Hash::digest(format!("{name}-closure").as_bytes()),
-                    sbom_hash: Blake3Hash::digest(format!("{name}-sbom").as_bytes()),
-                    slsa_level: 3,
-                }),
-                image: if matches!(kind, ArtifactKind::OciImage) {
-                    Some(ImageBlock {
-                        cosign_signature_ref: format!("ghcr.io/pleme-io/{name}:sig"),
-                        slsa_provenance_ref: format!("ghcr.io/pleme-io/{name}:prov"),
-                    })
-                } else {
-                    None
-                },
-                compliance: Some(ComplianceBlock {
-                    framework: "FedRAMP".into(),
-                    baseline: "high".into(),
-                    profile: profile.into(),
-                    result_hash: Blake3Hash::digest(format!("{name}-pack-hash").as_bytes()),
-                    status: ComplianceStatus::Compliant,
-                }),
-            },
-            bundle_members: None,
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -97,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sha256:{}",
             Blake3Hash::digest(b"tampered-image-manifest-bytes").to_hex()
         );
-        let cfg_image = helpers::cfg(
+        let cfg_image = artifact_config(
             ArtifactKind::OciImage,
             "openclaw-publisher-pki-tampered",
             "0.1.0",
@@ -154,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sha256:{}",
             Blake3Hash::digest(b"tampered-helm-chart-bytes").to_hex()
         );
-        let cfg_chart = helpers::cfg(
+        let cfg_chart = artifact_config(
             ArtifactKind::HelmChart,
             "lareira-openclaw-pki-tampered",
             "0.1.0",
