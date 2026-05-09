@@ -38,6 +38,38 @@ enum Cmd {
     Digest {
         manifest: PathBuf,
     },
+    /// Generate a CycloneDX 1.6 SBOM for an OCI image manifest.
+    /// Output is canonical JSON (deterministic — same inputs ⇒
+    /// byte-identical output) suitable for hashing into
+    /// `BuildAttestation.sbom_hash` and attaching as an OCI
+    /// referrer per OCI v1.1 (Phase C5).
+    Sbom {
+        /// Path to the manifest body (raw bytes).
+        #[arg(long)]
+        manifest: PathBuf,
+        /// OCI image path (e.g. `pleme-io/openclaw-publisher-pki`).
+        #[arg(long)]
+        image: String,
+        /// Reference (tag or digest) for the published artifact.
+        #[arg(long)]
+        reference: String,
+        /// RFC 3339 timestamp for `metadata.timestamp`. Defaults to
+        /// the current UTC time if unset; pass an explicit value to
+        /// reproduce a previous SBOM bit-for-bit.
+        #[arg(long)]
+        timestamp: Option<String>,
+        /// UUID URN for `serialNumber`. Defaults to a value derived
+        /// from the manifest digest so re-runs over the same image
+        /// produce the same urn (deterministic).
+        #[arg(long)]
+        serial_number: Option<String>,
+        /// Optional publisher name (sets `metadata.component.publisher`).
+        #[arg(long)]
+        publisher: Option<String>,
+        /// Output path. If unset, write to stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Submit a `CompliantListing` to cartorio + push manifest to lacre.
     Publish {
         /// Path to the manifest body (raw bytes, hashed as-is).
@@ -181,6 +213,53 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Cmd::Digest { manifest } => {
             let bytes = std::fs::read(&manifest)?;
             println!("{}", tabeliao::publish::manifest_digest(&bytes));
+            Ok(())
+        }
+        Cmd::Sbom {
+            manifest,
+            image,
+            reference,
+            timestamp,
+            serial_number,
+            publisher,
+            output,
+        } => {
+            let manifest_bytes = std::fs::read(&manifest)?;
+            // Default timestamp = now (RFC 3339). Operator must pass
+            // an explicit timestamp to reproduce a prior SBOM
+            // bit-for-bit. Default serial = derived from manifest
+            // digest (deterministic across re-runs over same image).
+            let ts = timestamp.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            let serial = serial_number.unwrap_or_else(|| {
+                let digest = tabeliao::publish::manifest_digest(&manifest_bytes);
+                let hex_part = digest.strip_prefix("sha256:").unwrap_or(&digest);
+                // RFC 4122 UUID URN: synth a v4-shape from the first
+                // 32 hex chars of the manifest digest. Not a true v4
+                // (no random bits), but stable across re-runs and
+                // syntactically valid as a urn:uuid:.
+                let h = hex_part;
+                format!(
+                    "urn:uuid:{}-{}-{}-{}-{}",
+                    &h[0..8],
+                    &h[8..12],
+                    &h[12..16],
+                    &h[16..20],
+                    &h[20..32]
+                )
+            });
+            let sbom = tabeliao::sbom::from_oci_manifest(
+                &manifest_bytes,
+                &image,
+                &reference,
+                &ts,
+                &serial,
+                publisher.as_deref(),
+            )?;
+            let json = tabeliao::sbom::serialize_canonical(&sbom)?;
+            match output {
+                Some(path) => std::fs::write(&path, json.as_bytes())?,
+                None => println!("{json}"),
+            }
             Ok(())
         }
         Cmd::Publish {

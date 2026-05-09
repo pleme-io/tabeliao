@@ -28,6 +28,7 @@ pub mod cosign;
 pub mod demo;
 pub mod error;
 pub mod publish;
+pub mod sbom;
 pub mod sign;
 
 pub use admit::build_admit_input;
