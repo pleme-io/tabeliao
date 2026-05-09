@@ -86,6 +86,13 @@ enum Cmd {
         signing_key_file: Option<PathBuf>,
         #[arg(long, env = "TABELIAO_SIGNING_KEY")]
         signing_key: Option<String>,
+        /// **Phase C4 — Sigstore Bundle v0.3 wrapping.** When set,
+        /// the output is wrapped in `application/vnd.dev.sigstore.bundle.v0.3+json`
+        /// shape; stock `cosign verify-attestation --bundle <file>
+        /// --key publisher.pub` reads it directly. When unset, the
+        /// raw DSSE envelope is emitted.
+        #[arg(long, default_value_t = false)]
+        sigstore_bundle: bool,
         /// Output path. If unset, write to stdout.
         #[arg(long)]
         output: Option<PathBuf>,
@@ -301,6 +308,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             signing_key_stdin,
             signing_key_file,
             signing_key,
+            sigstore_bundle,
             output,
         } => {
             let key_hex = resolve_signing_key(
@@ -354,7 +362,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             };
             let statement = tabeliao::slsa::build_statement(&subject_name, &subject_sha256, &predicate)?;
             let envelope = tabeliao::slsa::sign_envelope(&statement, &signer)?;
-            let json = serde_json::to_string_pretty(&envelope)?;
+            let json = if sigstore_bundle {
+                let bundle = tabeliao::slsa::dsse_to_sigstore_bundle_v0_3(envelope);
+                info!(media_type = tabeliao::slsa::SIGSTORE_BUNDLE_V0_3_MEDIA_TYPE, "wrapped in Sigstore Bundle v0.3");
+                serde_json::to_string_pretty(&bundle)?
+            } else {
+                serde_json::to_string_pretty(&envelope)?
+            };
             info!(publisher_pubkey = %signer.verifying_key_hex(), "SLSA Provenance signed");
             match output {
                 Some(path) => std::fs::write(&path, json.as_bytes())?,

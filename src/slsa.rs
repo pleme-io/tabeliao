@@ -233,6 +233,181 @@ pub fn sign_envelope(statement: &Statement, signer: &Ed25519Signer) -> Result<En
     })
 }
 
+// ─── Sigstore Bundle v0.3 (Phase C4) ─────────────────────────────────
+//
+// Per the sigstore protobuf-specs `dev.sigstore.bundle.v1.Bundle`
+// shape (proto3 → JSON via protojson canonical mapping). For an
+// in-toto attestation signed with a static Ed25519 key (no Fulcio
+// cert, no Rekor entry yet), the bundle carries:
+//
+//   {
+//     "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+//     "verificationMaterial": {
+//       "publicKey": { "hint": "<keyid hex>" }
+//     },
+//     "dsseEnvelope": { ... DSSE envelope from sign_envelope() ... }
+//   }
+//
+// Stock `cosign verify-attestation --bundle <file> --key <pem>`
+// reads this. The `publicKey.hint` carries the publisher's pubkey
+// hex so verifiers can match against an out-of-band allow-list
+// (cartorio's verifier policy, in our case).
+//
+// Sigstore Bundle v0.3 spec:
+// <https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto>
+
+pub const SIGSTORE_BUNDLE_V0_3_MEDIA_TYPE: &str =
+    "application/vnd.dev.sigstore.bundle.v0.3+json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigstoreBundle {
+    #[serde(rename = "mediaType")]
+    pub media_type: String,
+    #[serde(rename = "verificationMaterial")]
+    pub verification_material: VerificationMaterial,
+    #[serde(rename = "dsseEnvelope", skip_serializing_if = "Option::is_none")]
+    pub dsse_envelope: Option<Envelope>,
+    #[serde(rename = "messageSignature", skip_serializing_if = "Option::is_none")]
+    pub message_signature: Option<MessageSignature>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationMaterial {
+    /// Either `public_key` OR `certificate` (single leaf, v0.3 form).
+    /// We emit `public_key` for the static-Ed25519-publisher path;
+    /// future Fulcio-keyless flows would emit `certificate`.
+    #[serde(rename = "publicKey", skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<PublicKeyIdentifier>,
+    #[serde(rename = "certificate", skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<X509Certificate>,
+    /// Rekor inclusion proofs. Empty until self-hosted Rekor v2 lands
+    /// (Phase C6).
+    #[serde(rename = "tlogEntries", skip_serializing_if = "Vec::is_empty", default)]
+    pub tlog_entries: Vec<TransparencyLogEntry>,
+    /// RFC 3161 timestamps. Empty in v0.3 emit; reserved for Phase H.
+    #[serde(rename = "timestampVerificationData", skip_serializing_if = "Option::is_none")]
+    pub timestamp_verification_data: Option<TimestampVerificationData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicKeyIdentifier {
+    /// Opaque hint the verifier uses to match against an out-of-band
+    /// key registry. We populate it with the publisher's pubkey hex.
+    pub hint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct X509Certificate {
+    /// PEM-encoded leaf certificate (single, per Sigstore Bundle v0.3
+    /// — intermediates resolved from TUF root).
+    #[serde(rename = "rawBytes")]
+    pub raw_bytes: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransparencyLogEntry {
+    #[serde(rename = "logIndex")]
+    pub log_index: String,
+    #[serde(rename = "logId")]
+    pub log_id: LogId,
+    #[serde(rename = "kindVersion")]
+    pub kind_version: KindVersion,
+    #[serde(rename = "integratedTime")]
+    pub integrated_time: String,
+    #[serde(rename = "inclusionPromise", skip_serializing_if = "Option::is_none")]
+    pub inclusion_promise: Option<InclusionPromise>,
+    #[serde(rename = "inclusionProof", skip_serializing_if = "Option::is_none")]
+    pub inclusion_proof: Option<InclusionProof>,
+    #[serde(rename = "canonicalizedBody")]
+    pub canonicalized_body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogId {
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindVersion {
+    pub kind: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InclusionPromise {
+    #[serde(rename = "signedEntryTimestamp")]
+    pub signed_entry_timestamp: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InclusionProof {
+    #[serde(rename = "logIndex")]
+    pub log_index: String,
+    #[serde(rename = "rootHash")]
+    pub root_hash: String,
+    #[serde(rename = "treeSize")]
+    pub tree_size: String,
+    pub hashes: Vec<String>,
+    pub checkpoint: Checkpoint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub envelope: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimestampVerificationData {
+    #[serde(rename = "rfc3161Timestamps")]
+    pub rfc3161_timestamps: Vec<Rfc3161SignedTimestamp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rfc3161SignedTimestamp {
+    #[serde(rename = "signedTimestamp")]
+    pub signed_timestamp: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageSignature {
+    #[serde(rename = "messageDigest")]
+    pub message_digest: MessageDigest,
+    pub signature: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageDigest {
+    pub algorithm: String,
+    pub digest: String,
+}
+
+/// Wrap a DSSE envelope in a Sigstore Bundle v0.3, populating
+/// `verificationMaterial.publicKey.hint` with the publisher's
+/// pubkey hex from the envelope's first signature `keyid`.
+///
+/// Stock `cosign verify-attestation --bundle <output> --key
+/// publisher.pub` reads this directly.
+#[must_use]
+pub fn dsse_to_sigstore_bundle_v0_3(envelope: Envelope) -> SigstoreBundle {
+    let hint = envelope
+        .signatures
+        .first()
+        .map(|s| s.keyid.clone())
+        .unwrap_or_default();
+    SigstoreBundle {
+        media_type: SIGSTORE_BUNDLE_V0_3_MEDIA_TYPE.to_string(),
+        verification_material: VerificationMaterial {
+            public_key: Some(PublicKeyIdentifier { hint }),
+            certificate: None,
+            tlog_entries: Vec::new(), // populated when Rekor lands (Phase C6)
+            timestamp_verification_data: None,
+        },
+        dsse_envelope: Some(envelope),
+        message_signature: None,
+    }
+}
+
 /// Verify a DSSE envelope against the publisher's Ed25519 public key.
 /// Returns the parsed Statement on success.
 ///
