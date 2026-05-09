@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -7,6 +8,7 @@ use tabeliao::{
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "tabeliao — publisher-side companion to cartorio + lacre")]
@@ -66,18 +68,36 @@ enum Cmd {
         /// `blake3` is HMAC, shape-checked only — for tests/demos.
         #[arg(long, env = "TABELIAO_SIGNING_ALGORITHM", value_enum, default_value_t = SigningAlgorithm::Ed25519)]
         algorithm: SigningAlgorithm,
-        /// **Preferred:** path to a file containing the 64-hex-char
-        /// private key (no trailing newline required). Avoids leaking
-        /// the key into process listings / shell history.
+        /// **Most secure (preferred for production)**: read the
+        /// 64-hex-char private key from stdin. The key never touches
+        /// disk and never enters argv. Pipe-friendly with any secret
+        /// materializer:
         ///
-        /// Mutually exclusive with `--signing-key`. Exactly one of the
-        /// two MUST be set.
+        ///   `cofre apply --manifest cofre.yaml && \
+        ///    sops --decrypt --extract '["openclaw_publisher_key"]' \
+        ///         secrets.sops.json | tabeliao publish --signing-key-stdin ...`
+        ///
+        ///   `akeyless get-secret-value --name /openclaw/publisher-key \
+        ///    | jq -r .value | tabeliao publish --signing-key-stdin ...`
+        ///
+        /// Mutually exclusive with `--signing-key-file` and
+        /// `--signing-key`. Exactly one MUST be set.
+        #[arg(long, conflicts_with_all = ["signing_key_file", "signing_key"])]
+        signing_key_stdin: bool,
+        /// Path to a file containing the 64-hex-char private key.
+        /// Better than `--signing-key` (no argv leak); worse than
+        /// `--signing-key-stdin` (key briefly hits disk). Acceptable
+        /// when the file lives on a tmpfs mount.
+        ///
+        /// Mutually exclusive with `--signing-key-stdin` and
+        /// `--signing-key`.
         #[arg(long, env = "TABELIAO_SIGNING_KEY_FILE", conflicts_with = "signing_key")]
         signing_key_file: Option<PathBuf>,
         /// 64-hex-char signing key as a literal string. **Discouraged
         /// for production** — the key ends up in `argv` and shell
-        /// history. Use `--signing-key-file` instead. Kept for
-        /// back-compat and CI shims that pass it via env.
+        /// history. Kept for back-compat and CI shims that pass it
+        /// via env. Use `--signing-key-stdin` (preferred) or
+        /// `--signing-key-file` instead.
         #[arg(long, env = "TABELIAO_SIGNING_KEY")]
         signing_key: Option<String>,
         /// Optional compliance pack to enforce. Format
@@ -90,25 +110,51 @@ enum Cmd {
     },
 }
 
-/// Resolve the signing key from either `--signing-key-file` or
-/// `--signing-key`. Exactly one must be set; returns the trimmed
-/// 64-hex string. The file path is preferred — production deployments
-/// should use cofre or akeyless to materialize the file to a tmpfs
-/// mount that's removed after the publish completes.
+/// Resolve the signing key from one of three mutually-exclusive
+/// sources, in preference order:
+///
+///   1. `--signing-key-stdin` — read from stdin (cofre/akeyless/sops
+///      pipe-friendly; key never touches disk or argv). PREFERRED.
+///   2. `--signing-key-file` — read from file. Acceptable on tmpfs.
+///   3. `--signing-key` — inline string from CLI/env. Discouraged
+///      for production.
+///
+/// Returns a `Zeroizing<String>` so the buffer is overwritten on
+/// drop. The trim handles trailing newlines from `cofre`-style
+/// piped output.
 fn resolve_signing_key(
+    stdin: bool,
     file: Option<&PathBuf>,
     inline: Option<&str>,
-) -> std::result::Result<String, Box<dyn std::error::Error>> {
+) -> std::result::Result<Zeroizing<String>, Box<dyn std::error::Error>> {
+    if stdin {
+        // 256-byte cap is generous (64 hex + whitespace ≪ 256). Also
+        // bounds memory exposure if a caller mistakenly pipes a large
+        // file in.
+        let mut buf = Zeroizing::new(String::with_capacity(256));
+        let mut limited = std::io::stdin().lock().take(256);
+        limited
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("read --signing-key-stdin: {e}"))?;
+        let trimmed = Zeroizing::new(buf.trim().to_string());
+        // `buf` is dropped + zeroized; `trimmed` carries forward.
+        return Ok(trimmed);
+    }
     match (file, inline) {
         (Some(path), None) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("read signing-key file {}: {e}", path.display()))?;
-            Ok(content.trim().to_string())
+            // Wrap immediately. The intermediate `String` from
+            // `read_to_string` is unzeroizable (std::fs returns a
+            // plain String), but it's bounded in lifetime to this
+            // function and dropped before signing. Future hardening
+            // can swap to `read_to_zeroizing` if it becomes available.
+            Ok(Zeroizing::new(content.trim().to_string()))
         }
-        (None, Some(key)) => Ok(key.to_string()),
+        (None, Some(key)) => Ok(Zeroizing::new(key.to_string())),
         (None, None) => Err(
-            "no signing key supplied — set --signing-key-file (preferred) \
-             or --signing-key (env: TABELIAO_SIGNING_KEY{,_FILE})"
+            "no signing key supplied — set --signing-key-stdin (preferred), \
+             --signing-key-file, or --signing-key (env: TABELIAO_SIGNING_KEY{,_FILE})"
                 .into(),
         ),
         (Some(_), Some(_)) => Err(
@@ -146,13 +192,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             reference,
             content_type,
             algorithm,
+            signing_key_stdin,
             signing_key_file,
             signing_key,
             pack,
         } => {
             let cfg = AttestationsConfig::from_yaml_path(&config)?;
             let manifest_bytes = std::fs::read(&manifest)?;
-            let key_hex = resolve_signing_key(signing_key_file.as_ref(), signing_key.as_deref())?;
+            let key_hex = resolve_signing_key(
+                signing_key_stdin,
+                signing_key_file.as_ref(),
+                signing_key.as_deref(),
+            )?;
             // Construct the signer per the chosen algorithm. The Signer
             // trait is the seam — both impls produce a SignedRoot the
             // cartorio admit endpoint accepts.

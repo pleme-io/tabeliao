@@ -62,9 +62,45 @@ PUT lacre push (lacre asks cartorio → forwards if Active+org match)
 
 | Signer | When to use | Wire-up status |
 |---|---|---|
-| `Ed25519Signer` | **Production default since v0.7.0 / Phase C1.** Real cryptographic signatures verifiable by `cartorio::merkle::verify_ed25519_signed_root` against the publisher's allow-listed pubkey. Sigstore/cosign-compatible. | **Default in `Cmd::Publish`.** Construct via `--algorithm ed25519` (default) + `--signing-key-file <path>` (preferred) or `--signing-key <hex>` (back-compat). Mutually exclusive. |
+| `Ed25519Signer` | **Production default since v0.7.0 / Phase C1.** Real cryptographic signatures verifiable by `cartorio::merkle::verify_ed25519_signed_root` against the publisher's allow-listed pubkey. Sigstore/cosign-compatible. | **Default in `Cmd::Publish`.** Construct via `--algorithm ed25519` (default) + one of (preference order): `--signing-key-stdin` (best — never touches disk or argv; pipe-friendly with cofre/akeyless/sops/vault), `--signing-key-file <path>` (acceptable on tmpfs), `--signing-key <hex>` (back-compat; argv leak). Mutually exclusive. Buffer wrapped in `Zeroizing<String>` (Phase C2). |
 | `Blake3Signer` | Tests, demos, clusters that haven't deployed an Ed25519 verifier policy. Cartorio shape-checks (64 hex). | Opt-in via `--algorithm blake3`. Emits a deprecation warning on stderr. |
-| `CosignSigner` (full Sigstore — Fulcio + Rekor) | When Fulcio + Rekor self-host land (Phase C2/C5). Sigstore Bundle v0.3 protobuf + Fulcio cert chain + Rekor inclusion proof. | Not yet wired. The current `cosign.rs` emits the **legacy** `cosign sign-blob --bundle` JSON shape; Phase C4/C5 migrate it to Sigstore Bundle v0.3 protobuf and add Rekor `tlog_entries`. |
+| `CosignSigner` (full Sigstore — Fulcio + Rekor) | When Fulcio + Rekor self-host land (Phase C4/C5). Sigstore Bundle v0.3 protobuf + Fulcio cert chain + Rekor inclusion proof. | Not yet wired. The current `cosign.rs` emits the **legacy** `cosign sign-blob --bundle` JSON shape; Phase C4/C5 migrate it to Sigstore Bundle v0.3 protobuf and add Rekor `tlog_entries`. |
+
+## Production key-custody pattern (Phase C2)
+
+The `--signing-key-stdin` flag is the recommended production path
+because tabeliao remains decoupled from any specific secret store.
+Compose with the pleme-io canonical materializer (cofre) and an
+encrypted-at-rest backend (SOPS / Akeyless / Vault):
+
+```bash
+# 1) cofre materializes secrets to encrypted storage (Akeyless/SOPS/...).
+cofre apply --manifest cofre.yaml
+
+# 2) Decrypt + pipe into tabeliao. The key never:
+#    - hits unencrypted disk
+#    - enters tabeliao's argv
+#    - sets a process env var visible via /proc/<pid>/environ
+sops --decrypt --extract '["openclaw_publisher_key"]' secrets.sops.json \
+  | tabeliao publish \
+      --algorithm    ed25519 \
+      --signing-key-stdin \
+      --pack         fedramp-high-openclaw-image@3 \
+      --manifest     ./manifest.json \
+      --config       ./attestations.yaml \
+      --cartorio     https://cartorio-dev.quero.cloud \
+      --lacre        https://lacre.openclaw.svc:8083 \
+      --image        pleme-io/openclaw-publisher-pki \
+      --reference    sha256:f6505fd...
+```
+
+Inside tabeliao the key buffer is `Zeroizing<String>` — overwritten
+on drop, defending against memory-disclosure bugs leaking the key.
+
+cofre's hard rules (per `cofre/CLAUDE.md`) explicitly forbid plaintext
+on stdout, so cofre itself does not pipe directly into tabeliao —
+the canonical pipeline is `cofre apply` (writes encrypted at rest) →
+`sops|akeyless|vault` (decrypt) → `tabeliao publish --signing-key-stdin`.
 
 ## When adding a new pack to `pack_by_name`
 

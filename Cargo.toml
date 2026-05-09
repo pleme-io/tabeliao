@@ -1,6 +1,6 @@
 [package]
 name = "tabeliao"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["Pleme Team <team@pleme.io>"]
@@ -36,6 +36,11 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+# Phase C2 — key-buffer hygiene. Wraps the in-memory copy of the
+# 64-hex private key so it's overwritten on drop. Defense in depth
+# against memory-disclosure bugs (a future bounds-check failure
+# elsewhere in the binary doesn't leak the key).
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [lints.clippy]
 pedantic = "warn"

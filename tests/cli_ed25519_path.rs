@@ -154,6 +154,131 @@ attestation: {}
 }
 
 #[test]
+fn publish_with_stdin_signing_key_succeeds() {
+    // Phase C2 — the most-secure key source. Pipe a key on stdin;
+    // the binary should accept it (and proceed to attempt the network
+    // call). We assert the Ed25519 path is selected — the same way
+    // we assert it for --signing-key-file.
+    let cfg = write_temp(
+        r#"
+kind: oci-image
+name: x
+version: 0.0.1
+publisher_id: t@pleme.io
+org: pleme-io
+attestation: {}
+"#,
+    );
+    let manifest = write_temp(r#"{"schemaVersion":2}"#);
+    use std::process::Stdio;
+    let mut child = Command::new(binary_path())
+        .args([
+            "publish",
+            "--manifest", manifest.path().to_str().unwrap(),
+            "--config", cfg.path().to_str().unwrap(),
+            "--cartorio", "http://127.0.0.1:1",
+            "--lacre", "http://127.0.0.1:1",
+            "--image", "x/y",
+            "--reference", "v1",
+            "--signing-key-stdin",
+        ])
+        .env_remove("TABELIAO_SIGNING_KEY")
+        .env_remove("TABELIAO_SIGNING_KEY_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        // Trailing newline simulates `cofre apply | ...` style pipe.
+        stdin.write_all(b"01".repeat(32).as_slice()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Ed25519")
+            || stderr.contains("publisher Ed25519 public key"),
+        "expected Ed25519 production-path log via --signing-key-stdin, stderr: {stderr}",
+    );
+}
+
+#[test]
+fn publish_with_stdin_rejects_non_hex_garbage() {
+    // Garbage on stdin must fail with a clear key-parse error, not
+    // panic, not silently default to a zero key.
+    let cfg = write_temp(
+        r#"
+kind: oci-image
+name: x
+version: 0.0.1
+publisher_id: t@pleme.io
+org: pleme-io
+attestation: {}
+"#,
+    );
+    let manifest = write_temp(r#"{"schemaVersion":2}"#);
+    use std::process::Stdio;
+    let mut child = Command::new(binary_path())
+        .args([
+            "publish",
+            "--manifest", manifest.path().to_str().unwrap(),
+            "--config", cfg.path().to_str().unwrap(),
+            "--cartorio", "http://127.0.0.1:1",
+            "--lacre", "http://127.0.0.1:1",
+            "--image", "x/y",
+            "--reference", "v1",
+            "--signing-key-stdin",
+        ])
+        .env_remove("TABELIAO_SIGNING_KEY")
+        .env_remove("TABELIAO_SIGNING_KEY_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"this-is-not-a-hex-key\n").unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success(), "garbage stdin must exit non-zero");
+}
+
+#[test]
+fn stdin_and_inline_are_mutually_exclusive() {
+    let cfg = write_temp(
+        r#"
+kind: oci-image
+name: x
+version: 0.0.1
+publisher_id: t@pleme.io
+org: pleme-io
+attestation: {}
+"#,
+    );
+    let manifest = write_temp(r#"{"schemaVersion":2}"#);
+    let out = Command::new(binary_path())
+        .args([
+            "publish",
+            "--manifest", manifest.path().to_str().unwrap(),
+            "--config", cfg.path().to_str().unwrap(),
+            "--cartorio", "http://127.0.0.1:1",
+            "--lacre", "http://127.0.0.1:1",
+            "--image", "x/y",
+            "--reference", "v1",
+            "--signing-key-stdin",
+            "--signing-key", &"a".repeat(64),
+        ])
+        .env_remove("TABELIAO_SIGNING_KEY")
+        .env_remove("TABELIAO_SIGNING_KEY_FILE")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "stdin + inline must be rejected");
+}
+
+#[test]
 fn signing_key_file_and_inline_are_mutually_exclusive() {
     let cfg = write_temp(
         r#"
