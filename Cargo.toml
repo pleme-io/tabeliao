@@ -51,9 +51,7 @@ default = []
 dev-seeds = []
 
 [dependencies]
-# Phase C5/C6: cartorio v0.6.0 lives in the local working tree
-# (not yet tagged on github). Path dep until cartorio v0.6.0 is tagged.
-cartorio = { path = "../cartorio" }
+cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.6.0" }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
 base64 = "0.22"
