@@ -135,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         slsa_envelope_b64: None,
         slsa_referrer_url: None,
         slsa_build_level: None,
+        ssdf: None,
     };
     let admit = tabeliao::admit::build_admit_input(cfg, &digest, signed_at, &signer)?;
 

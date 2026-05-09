@@ -169,6 +169,7 @@ fn cfg_for(kind: ArtifactKind, name: &str, version: &str) -> AttestationsConfig 
         slsa_envelope_b64: None,
         slsa_referrer_url: None,
         slsa_build_level: None,
+        ssdf: None,
     }
 }
 
@@ -387,6 +388,7 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
         slsa_envelope_b64: None,
         slsa_referrer_url: None,
         slsa_build_level: None,
+        ssdf: None,
     };
     // Bundle compliance_run carries the per-test outcomes from the
     // bundle pack run.

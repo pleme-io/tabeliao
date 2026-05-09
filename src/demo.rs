@@ -78,6 +78,7 @@ pub fn artifact_config(
         slsa_envelope_b64: None,
         slsa_referrer_url: None,
         slsa_build_level: None,
+        ssdf: None,
     }
 }
 

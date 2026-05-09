@@ -218,6 +218,14 @@ enum Cmd {
         /// isolated hosted builder (e.g. SLSA GitHub Generator).
         #[arg(long, default_value_t = 0)]
         slsa_build_level: u8,
+        /// **Phase H — CISA Common Form / SSDF attestation.** Path
+        /// to the signed Common Form PDF (or any signed SSDF
+        /// attestation document). The file's sha256 lands in
+        /// `AttestationChain.ssdf.common_form_pdf_sha256`. The
+        /// other SSDF fields (signatory_name, role, conforming_practices,
+        /// etc.) are read from the attestations.yaml `ssdf:` block.
+        #[arg(long)]
+        attach_ssdf_pdf: Option<PathBuf>,
     },
 }
 
@@ -440,6 +448,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             sbom_format,
             attach_slsa,
             slsa_build_level,
+            attach_ssdf_pdf,
         } => {
             let mut cfg = AttestationsConfig::from_yaml_path(&config)?;
             // Phase C7 — attach SBOM + SLSA documents from disk, base64-
@@ -462,6 +471,25 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     Some(base64::engine::general_purpose::STANDARD.encode(&bytes));
                 cfg.slsa_build_level = Some(slsa_build_level);
                 info!(path = %slsa_path.display(), bytes = bytes.len(), level = slsa_build_level, "attached SLSA");
+            }
+            if let Some(pdf_path) = &attach_ssdf_pdf {
+                use sha2::{Digest as _, Sha256};
+                let bytes = std::fs::read(pdf_path)?;
+                let mut h = Sha256::new();
+                h.update(&bytes);
+                let pdf_sha = format!("{:x}", h.finalize());
+                if let Some(ssdf) = cfg.ssdf.as_mut() {
+                    ssdf.common_form_pdf_sha256 = pdf_sha.clone();
+                } else {
+                    return Err(format!(
+                        "--attach-ssdf-pdf {} requires an `ssdf:` block in attestations.yaml \
+                         (signatory_name, signatory_role, signed_at_rfc3339, expires_at_rfc3339, \
+                          producer_pubkey_sha256, conforming_practices). Operator authors the \
+                          metadata; tabeliao binds the PDF hash.",
+                        pdf_path.display()
+                    ).into());
+                }
+                info!(path = %pdf_path.display(), bytes = bytes.len(), sha256 = %pdf_sha, "attached CISA Common Form PDF");
             }
             let manifest_bytes = std::fs::read(&manifest)?;
             let key_hex = resolve_signing_key(

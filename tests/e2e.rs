@@ -158,6 +158,7 @@ fn cfg_for(name: &str, version: &str) -> AttestationsConfig {
         slsa_envelope_b64: None,
         slsa_referrer_url: None,
         slsa_build_level: None,
+        ssdf: None,
     }
 }
 
@@ -769,6 +770,7 @@ async fn provable_statement_openclaw_bundle_is_fedramp_high() {
         slsa_envelope_b64: None,
         slsa_referrer_url: None,
         slsa_build_level: None,
+        ssdf: None,
     };
     let bundle_admit = tabeliao::admit::build_admit_input(
         bundle_cfg,

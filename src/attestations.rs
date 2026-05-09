@@ -10,6 +10,7 @@ use std::path::Path;
 use cartorio::core::types::{
     ArtifactKind, AttestationChain, BuildAttestation, ComplianceAttestation, ComplianceStatus,
     ImageAttestation, SbomAttestation, SlsaProvenanceAttestation, SourceAttestation,
+    SsdfAttestation,
 };
 use serde::{Deserialize, Serialize};
 use tameshi::hash::Blake3Hash;
@@ -54,6 +55,29 @@ pub struct AttestationsConfig {
     pub slsa_referrer_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slsa_build_level: Option<u8>,
+
+    /// **v0.10.0 (Phase H) — SSDF / CISA Common Form attestation.**
+    /// When set, populates `AttestationChain.ssdf` per cartorio v0.6.0
+    /// `SsdfAttestation`. Operator typically authors a separate
+    /// `ssdf:` block at the top of attestations.yaml.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssdf: Option<SsdfBlock>,
+}
+
+/// YAML-authored SSDF (NIST SP 800-218 / CISA Common Form) attestation.
+/// Mirrors `cartorio::core::types::SsdfAttestation`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsdfBlock {
+    pub common_form_pdf_sha256: String,
+    pub signatory_name: String,
+    pub signatory_role: String,
+    pub producer_pubkey_sha256: String,
+    pub signed_at_rfc3339: String,
+    pub expires_at_rfc3339: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poam_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conforming_practices: Vec<String>,
 }
 
 /// YAML-authored bundle member entry. Mirrors `provas::BundleMember`.
@@ -157,6 +181,78 @@ attestation:
         assert_eq!(image.cosign_signature_ref, "ghcr.io/x:sig");
     }
 
+    /// **Phase H** — operator-authored SSDF block round-trips and the
+    /// chain carries the SSDF pillar with every field byte-for-byte.
+    /// This is the YAML surface a publisher edits to claim CISA Common
+    /// Form conformance per OMB M-22-18.
+    #[test]
+    fn ssdf_block_roundtrips_and_lands_in_chain() {
+        let yaml = r"
+kind: oci-image
+name: openclaw-publisher-pki
+version: 0.10.0
+publisher_id: drzzln@protonmail.com
+org: pleme-io
+ssdf:
+  common_form_pdf_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  signatory_name: Daniel R. Z.
+  signatory_role: Founder & Chief Engineer
+  producer_pubkey_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  signed_at_rfc3339: '2026-05-09T00:00:00Z'
+  expires_at_rfc3339: '2027-05-09T00:00:00Z'
+  conforming_practices:
+    - PO.1.1
+    - PS.1.1
+    - PS.2.1
+    - PW.4.1
+    - PW.7.1
+    - RV.1.1
+";
+        let cfg: AttestationsConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let chain = cfg.into_attestation_chain("sha256:beef");
+        let ssdf = chain.ssdf.expect("ssdf pillar must be populated");
+        assert_eq!(ssdf.signatory_name, "Daniel R. Z.");
+        assert_eq!(ssdf.signatory_role, "Founder & Chief Engineer");
+        assert_eq!(ssdf.signed_at_rfc3339, "2026-05-09T00:00:00Z");
+        assert_eq!(ssdf.expires_at_rfc3339, "2027-05-09T00:00:00Z");
+        assert_eq!(ssdf.conforming_practices.len(), 6);
+        assert_eq!(ssdf.conforming_practices[0], "PO.1.1");
+        assert_eq!(ssdf.conforming_practices[5], "RV.1.1");
+        assert!(ssdf.poam_url.is_none(), "no poam — clean Common Form claim");
+    }
+
+    /// **Phase H** — partial-conformance path: a publisher claims SSDF
+    /// with a POA&M URL pointing at the open items per OMB M-23-16.
+    /// Order of `conforming_practices` is preserved (load-bearing for
+    /// `pillar:ssdf:practice:N:` domain separators in `feed_ssdf`).
+    #[test]
+    fn ssdf_block_with_poam_preserves_practice_order() {
+        let yaml = r"
+kind: oci-image
+name: x
+version: 0.1.0
+publisher_id: alice@pleme.io
+org: pleme-io
+ssdf:
+  common_form_pdf_sha256: 1111111111111111111111111111111111111111111111111111111111111111
+  signatory_name: Alice
+  signatory_role: CISO
+  producer_pubkey_sha256: 2222222222222222222222222222222222222222222222222222222222222222
+  signed_at_rfc3339: '2026-05-09T00:00:00Z'
+  expires_at_rfc3339: '2027-05-09T00:00:00Z'
+  poam_url: https://github.com/pleme-io/openclaw/security/advisories/GHSA-xxxx
+  conforming_practices: ['PW.7.1', 'PO.1.1', 'PS.1.1']
+";
+        let cfg: AttestationsConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let chain = cfg.into_attestation_chain("sha256:cafe");
+        let ssdf = chain.ssdf.expect("ssdf pillar must be populated");
+        assert_eq!(ssdf.poam_url.as_deref(), Some(
+            "https://github.com/pleme-io/openclaw/security/advisories/GHSA-xxxx"
+        ));
+        // Order matters — feed_ssdf domain-separates by index.
+        assert_eq!(ssdf.conforming_practices, vec!["PW.7.1", "PO.1.1", "PS.1.1"]);
+    }
+
     #[test]
     fn empty_attestation_block_yields_all_none_pillars() {
         let yaml = r"
@@ -236,9 +332,18 @@ impl AttestationsConfig {
                     build_level: self.slsa_build_level.unwrap_or(0),
                 }
             }),
-            // SSDF pillar wired in a future sub-phase (Common Form PDF
-            // attestation flow).
-            ssdf: None,
+            // SSDF pillar (Phase H) — populated from the YAML's
+            // `ssdf:` block when present.
+            ssdf: self.ssdf.as_ref().map(|s| SsdfAttestation {
+                common_form_pdf_sha256: s.common_form_pdf_sha256.clone(),
+                signatory_name: s.signatory_name.clone(),
+                signatory_role: s.signatory_role.clone(),
+                producer_pubkey_sha256: s.producer_pubkey_sha256.clone(),
+                signed_at_rfc3339: s.signed_at_rfc3339.clone(),
+                expires_at_rfc3339: s.expires_at_rfc3339.clone(),
+                poam_url: s.poam_url.clone(),
+                conforming_practices: s.conforming_practices.clone(),
+            }),
         }
     }
 }
