@@ -19,7 +19,11 @@ construct AdmitArtifactInput with pack_hash → ComplianceAttestation.result_has
    ↓
 construct ComplianceRun (per-test outcomes) → input.compliance_run
    ↓
-sign state-leaf root with Ed25519Signer (real crypto)
+sign state-leaf root (in `Cmd::Publish` today: Blake3Signer
+   keyed-HMAC, shape-checked by cartorio — NOT cryptographic.
+   `Ed25519Signer` exists in lib + cosign module but is NOT wired
+   into the `Cmd::Publish` codepath; reaching it requires a
+   library consumer. Phase C makes this real.)
    ↓
 POST cartorio admit
    ↓
@@ -56,11 +60,11 @@ PUT lacre push (lacre asks cartorio → forwards if Active+org match)
 
 ## Signing rules
 
-| Signer | When to use |
-|---|---|
-| `Blake3Signer` | Tests, demos, clusters that haven't deployed Ed25519 verifier policy. Cartorio shape-checks (64 hex). |
-| `Ed25519Signer` | Production. Real cryptographic signatures verifiable by stock cosign tooling and cartorio's `verify_ed25519_signed_root`. |
-| `CosignSigner` (future, full keyless) | When Fulcio + Rekor are deployed. Same wire format as Ed25519Signer + Fulcio cert chain in the bundle's `cert` field. |
+| Signer | When to use | Wire-up status |
+|---|---|---|
+| `Blake3Signer` | Tests, demos, clusters that haven't deployed Ed25519 verifier policy. Cartorio shape-checks (64 hex). | **CURRENTLY THE ONLY SIGNER `Cmd::Publish` CONSTRUCTS.** Production binary path. |
+| `Ed25519Signer` | Production target. Real cryptographic signatures verifiable by stock cosign tooling and cartorio's `verify_ed25519_signed_root`. | Lib-only; cosign-bundle module emits this format; **NOT yet reachable from `Cmd::Publish`** — Phase C wires it. |
+| `CosignSigner` (future, full keyless) | When Fulcio + Rekor are deployed. Sigstore Bundle v0.3 protobuf format + Fulcio cert chain + Rekor inclusion proof. | Not implemented. Phase C target. The current `cosign.rs` emits the **legacy** `cosign sign-blob --bundle` JSON shape, not Sigstore Bundle v0.3. |
 
 ## When adding a new pack to `pack_by_name`
 

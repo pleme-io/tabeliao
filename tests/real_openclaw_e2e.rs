@@ -159,6 +159,7 @@ fn cfg_for(kind: ArtifactKind, name: &str, version: &str) -> AttestationsConfig 
                 status: ComplianceStatus::Compliant,
             }),
         },
+        bundle_members: None,
     }
 }
 
@@ -370,6 +371,7 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
                 status: ComplianceStatus::Compliant,
             }),
         },
+        bundle_members: None,
     };
     // Bundle compliance_run carries the per-test outcomes from the
     // bundle pack run.

@@ -148,6 +148,7 @@ fn cfg_for(name: &str, version: &str) -> AttestationsConfig {
                 status: ComplianceStatus::Compliant,
             }),
         },
+        bundle_members: None,
     }
 }
 
@@ -749,6 +750,7 @@ async fn provable_statement_openclaw_bundle_is_fedramp_high() {
                 status: cartorio::core::types::ComplianceStatus::Compliant,
             }),
         },
+        bundle_members: None,
     };
     let bundle_admit = tabeliao::admit::build_admit_input(
         bundle_cfg,
