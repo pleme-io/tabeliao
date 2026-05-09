@@ -1,3 +1,4 @@
 {
+  "git+https://github.com/pleme-io/cartorio?tag=v0.6.0#0.6.0": "0k9in8bdfhqdkjh19pqzmdzjagz47vyg0mw44pc5cl17jv9b5cj0",
   "git+https://github.com/pleme-io/provas?tag=v0.4.0#0.4.0": "06dymxba7sc49bz5y7fzpaazp4xa35ygfdzs3ywvnlilpryrjypw"
 }
