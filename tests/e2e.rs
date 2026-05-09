@@ -87,6 +87,9 @@ async fn spawn_cartorio() -> (String, Arc<CartorioAppState>) {
         org: ORG.into(),
         listen: "127.0.0.1:0".into(),
         pki_url: None,
+        auth_bearer_token: None,
+        cors_allowed_origins: Vec::new(),
+        verifier: cartorio::config::VerifierPolicy::default(),
     };
     let state = CartorioAppState::new(cfg);
     let app = cartorio_router(state.clone());
@@ -149,6 +152,12 @@ fn cfg_for(name: &str, version: &str) -> AttestationsConfig {
             }),
         },
         bundle_members: None,
+        sbom_document_b64: None,
+        sbom_format: None,
+        sbom_referrer_url: None,
+        slsa_envelope_b64: None,
+        slsa_referrer_url: None,
+        slsa_build_level: None,
     }
 }
 
@@ -291,6 +300,9 @@ async fn publish_surfaces_lacre_rejection_when_org_mismatch() {
         org: "other-org".into(),
         listen: "127.0.0.1:0".into(),
         pki_url: None,
+        auth_bearer_token: None,
+        cors_allowed_origins: Vec::new(),
+        verifier: cartorio::config::VerifierPolicy::default(),
     };
     let cartorio_state = CartorioAppState::new(cfg);
     let app = cartorio_router(cartorio_state.clone());
@@ -751,6 +763,12 @@ async fn provable_statement_openclaw_bundle_is_fedramp_high() {
             }),
         },
         bundle_members: None,
+        sbom_document_b64: None,
+        sbom_format: None,
+        sbom_referrer_url: None,
+        slsa_envelope_b64: None,
+        slsa_referrer_url: None,
+        slsa_build_level: None,
     };
     let bundle_admit = tabeliao::admit::build_admit_input(
         bundle_cfg,

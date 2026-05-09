@@ -126,6 +126,12 @@ mod tests {
                 }),
             },
             bundle_members: None,
+            sbom_document_b64: None,
+            sbom_format: None,
+            sbom_referrer_url: None,
+            slsa_envelope_b64: None,
+            slsa_referrer_url: None,
+            slsa_build_level: None,
         }
     }
 

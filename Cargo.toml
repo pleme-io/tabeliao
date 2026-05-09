@@ -1,6 +1,6 @@
 [package]
 name = "tabeliao"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["Pleme Team <team@pleme.io>"]
@@ -51,7 +51,9 @@ default = []
 dev-seeds = []
 
 [dependencies]
-cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.4.1" }
+# Phase C5/C6: cartorio v0.6.0 lives in the local working tree
+# (not yet tagged on github). Path dep until cartorio v0.6.0 is tagged.
+cartorio = { path = "../cartorio" }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
 base64 = "0.22"

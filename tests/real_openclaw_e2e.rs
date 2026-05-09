@@ -113,6 +113,9 @@ async fn spawn_cartorio() -> (String, Arc<CartorioAppState>) {
         org: ORG.into(),
         listen: "127.0.0.1:0".into(),
         pki_url: None,
+        auth_bearer_token: None,
+        cors_allowed_origins: Vec::new(),
+        verifier: cartorio::config::VerifierPolicy::default(),
     };
     let state = CartorioAppState::new(cfg);
     let app = cartorio_router(state.clone());
@@ -160,6 +163,12 @@ fn cfg_for(kind: ArtifactKind, name: &str, version: &str) -> AttestationsConfig 
             }),
         },
         bundle_members: None,
+        sbom_document_b64: None,
+        sbom_format: None,
+        sbom_referrer_url: None,
+        slsa_envelope_b64: None,
+        slsa_referrer_url: None,
+        slsa_build_level: None,
     }
 }
 
@@ -372,6 +381,12 @@ async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
             }),
         },
         bundle_members: None,
+        sbom_document_b64: None,
+        sbom_format: None,
+        sbom_referrer_url: None,
+        slsa_envelope_b64: None,
+        slsa_referrer_url: None,
+        slsa_build_level: None,
     };
     // Bundle compliance_run carries the per-test outcomes from the
     // bundle pack run.

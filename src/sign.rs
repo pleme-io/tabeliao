@@ -155,6 +155,8 @@ impl Signer for Ed25519Signer {
             algorithm: SigningAlgorithm::Ed25519,
             signer_id: signer_id.to_string(),
             signed_at,
+            cert_chain: None,
+            rekor_bundle: None,
         })
     }
 }
@@ -179,6 +181,8 @@ impl Signer for Blake3Signer {
             algorithm: SigningAlgorithm::Blake3KeyedHmac,
             signer_id: signer_id.to_string(),
             signed_at,
+            cert_chain: None,
+            rekor_bundle: None,
         })
     }
 }
