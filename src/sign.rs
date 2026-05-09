@@ -128,6 +128,16 @@ impl Ed25519Signer {
     pub fn verifying_key_hex(&self) -> String {
         hex::encode(self.verifying_key_bytes())
     }
+
+    /// Sign arbitrary bytes (DSSE-style envelope, in-toto Statement
+    /// PAE bytes, etc.). Returns the 64-byte Ed25519 signature.
+    /// Used by Phase C3b's SLSA Provenance signer + Phase C4's
+    /// Sigstore Bundle v0.3 emitter.
+    #[must_use]
+    pub fn sign_bytes(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        self.signing_key.sign(message).to_bytes()
+    }
 }
 
 impl Signer for Ed25519Signer {

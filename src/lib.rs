@@ -30,6 +30,7 @@ pub mod error;
 pub mod publish;
 pub mod sbom;
 pub mod sign;
+pub mod slsa;
 
 pub use admit::build_admit_input;
 pub use attestations::AttestationsConfig;

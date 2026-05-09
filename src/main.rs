@@ -38,6 +38,58 @@ enum Cmd {
     Digest {
         manifest: PathBuf,
     },
+    /// Emit a SLSA Provenance v1 in-toto Statement wrapped in a DSSE
+    /// envelope, signed with Ed25519. Output is JSON suitable for
+    /// attaching to an OCI image as a referrer (Phase C4) and
+    /// reading by stock `cosign verify-attestation --type
+    /// slsaprovenance1`.
+    SlsaProvenance {
+        /// OCI image name + sha256 digest of the artifact being attested.
+        #[arg(long)]
+        subject_name: String,
+        /// 64-hex-char sha256 digest (no `sha256:` prefix).
+        #[arg(long)]
+        subject_sha256: String,
+        /// SLSA buildType URI (e.g.
+        /// `https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1`).
+        #[arg(long)]
+        build_type: String,
+        /// Source repository URL (sets resolvedDependencies[0].uri).
+        #[arg(long)]
+        source_repo: String,
+        /// Source git commit (sets resolvedDependencies[0].digest.gitCommit).
+        #[arg(long)]
+        source_commit: String,
+        /// Source ref (e.g. `refs/tags/v0.1.0`).
+        #[arg(long)]
+        source_ref: String,
+        /// Builder identity URI. For SLSA L3 this MUST point at an
+        /// isolated hosted builder whose signing key is unreachable
+        /// from user-defined steps.
+        #[arg(long)]
+        builder_id: String,
+        /// RFC 3339 build start timestamp.
+        #[arg(long)]
+        build_started: Option<String>,
+        /// RFC 3339 build finish timestamp.
+        #[arg(long)]
+        build_finished: Option<String>,
+        /// Workflow path inside the source repo (sets
+        /// externalParameters.workflow.path).
+        #[arg(long)]
+        workflow_path: Option<String>,
+        /// Signing-key sources — same trio as `publish`. Mutually
+        /// exclusive; exactly one MUST be set. Always Ed25519.
+        #[arg(long, conflicts_with_all = ["signing_key_file", "signing_key"])]
+        signing_key_stdin: bool,
+        #[arg(long, env = "TABELIAO_SIGNING_KEY_FILE", conflicts_with = "signing_key")]
+        signing_key_file: Option<PathBuf>,
+        #[arg(long, env = "TABELIAO_SIGNING_KEY")]
+        signing_key: Option<String>,
+        /// Output path. If unset, write to stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Generate a CycloneDX 1.6 SBOM for an OCI image manifest.
     /// Output is canonical JSON (deterministic — same inputs ⇒
     /// byte-identical output) suitable for hashing into
@@ -213,6 +265,81 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Cmd::Digest { manifest } => {
             let bytes = std::fs::read(&manifest)?;
             println!("{}", tabeliao::publish::manifest_digest(&bytes));
+            Ok(())
+        }
+        Cmd::SlsaProvenance {
+            subject_name,
+            subject_sha256,
+            build_type,
+            source_repo,
+            source_commit,
+            source_ref,
+            builder_id,
+            build_started,
+            build_finished,
+            workflow_path,
+            signing_key_stdin,
+            signing_key_file,
+            signing_key,
+            output,
+        } => {
+            let key_hex = resolve_signing_key(
+                signing_key_stdin,
+                signing_key_file.as_ref(),
+                signing_key.as_deref(),
+            )?;
+            let signer = Ed25519Signer::from_hex(&key_hex)?;
+            let mut workflow = serde_json::Map::new();
+            workflow.insert("repository".into(), serde_json::Value::String(source_repo.clone()));
+            workflow.insert("ref".into(), serde_json::Value::String(source_ref.clone()));
+            if let Some(p) = workflow_path {
+                workflow.insert("path".into(), serde_json::Value::String(p));
+            }
+            let mut params = serde_json::Map::new();
+            params.insert("workflow".into(), serde_json::Value::Object(workflow));
+
+            let mut commit_digest = std::collections::BTreeMap::new();
+            commit_digest.insert("gitCommit".into(), source_commit.clone());
+
+            let predicate = tabeliao::slsa::SlsaProvenance {
+                build_definition: tabeliao::slsa::BuildDefinition {
+                    build_type,
+                    external_parameters: serde_json::Value::Object(params),
+                    internal_parameters: None,
+                    resolved_dependencies: vec![tabeliao::slsa::ResourceDescriptor {
+                        name: Some("source".into()),
+                        digest: commit_digest,
+                        uri: Some(format!("git+{source_repo}@{source_ref}")),
+                        media_type: None,
+                        download_location: None,
+                    }],
+                },
+                run_details: tabeliao::slsa::RunDetails {
+                    builder: tabeliao::slsa::Builder {
+                        id: builder_id,
+                        version: None,
+                        builder_dependencies: Vec::new(),
+                    },
+                    metadata: if build_started.is_some() || build_finished.is_some() {
+                        Some(tabeliao::slsa::Metadata {
+                            invocation_id: None,
+                            started_on: build_started,
+                            finished_on: build_finished,
+                        })
+                    } else {
+                        None
+                    },
+                    byproducts: Vec::new(),
+                },
+            };
+            let statement = tabeliao::slsa::build_statement(&subject_name, &subject_sha256, &predicate)?;
+            let envelope = tabeliao::slsa::sign_envelope(&statement, &signer)?;
+            let json = serde_json::to_string_pretty(&envelope)?;
+            info!(publisher_pubkey = %signer.verifying_key_hex(), "SLSA Provenance signed");
+            match output {
+                Some(path) => std::fs::write(&path, json.as_bytes())?,
+                None => println!("{json}"),
+            }
             Ok(())
         }
         Cmd::Sbom {
