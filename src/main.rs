@@ -191,6 +191,26 @@ enum Cmd {
         /// `pack_hash` is baked into the `ComplianceAttestation`.
         #[arg(long, env = "TABELIAO_COMPLIANCE_PACK")]
         pack: Option<String>,
+        /// **Phase C7** — attach a CycloneDX (or SPDX) SBOM document
+        /// to the cartorio admission. The file is read, base64-encoded,
+        /// and lands in the new `AttestationChain.sbom` pillar (Phase
+        /// C5) so verifiers can re-derive `sbom_hash` from public bytes.
+        #[arg(long)]
+        attach_sbom: Option<PathBuf>,
+        /// SBOM format string for the `SbomAttestation.format` field.
+        /// Defaults to `cyclonedx-1.6` (matches `tabeliao sbom` output).
+        #[arg(long)]
+        sbom_format: Option<String>,
+        /// **Phase C7** — attach a DSSE-wrapped SLSA Provenance v1
+        /// envelope (e.g. produced by `tabeliao slsa-provenance`).
+        /// Lands in `AttestationChain.slsa_provenance`.
+        #[arg(long)]
+        attach_slsa: Option<PathBuf>,
+        /// SLSA build level claimed (0-3). Default 0 (unverified).
+        /// Operator passes 3 only when builder.id points at an
+        /// isolated hosted builder (e.g. SLSA GitHub Generator).
+        #[arg(long, default_value_t = 0)]
+        slsa_build_level: u8,
     },
 }
 
@@ -402,8 +422,33 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             signing_key_file,
             signing_key,
             pack,
+            attach_sbom,
+            sbom_format,
+            attach_slsa,
+            slsa_build_level,
         } => {
-            let cfg = AttestationsConfig::from_yaml_path(&config)?;
+            let mut cfg = AttestationsConfig::from_yaml_path(&config)?;
+            // Phase C7 — attach SBOM + SLSA documents from disk, base64-
+            // encoding so they ride inside the cartorio admit JSON.
+            // sha256 of the raw bytes lands in
+            // SbomAttestation.document_sha256 / SlsaProvenanceAttestation
+            // .envelope_sha256 (computed in into_attestation_chain).
+            if let Some(sbom_path) = &attach_sbom {
+                use base64::Engine as _;
+                let bytes = std::fs::read(sbom_path)?;
+                cfg.sbom_document_b64 =
+                    Some(base64::engine::general_purpose::STANDARD.encode(&bytes));
+                cfg.sbom_format = sbom_format.or_else(|| Some("cyclonedx-1.6".into()));
+                info!(path = %sbom_path.display(), bytes = bytes.len(), "attached SBOM");
+            }
+            if let Some(slsa_path) = &attach_slsa {
+                use base64::Engine as _;
+                let bytes = std::fs::read(slsa_path)?;
+                cfg.slsa_envelope_b64 =
+                    Some(base64::engine::general_purpose::STANDARD.encode(&bytes));
+                cfg.slsa_build_level = Some(slsa_build_level);
+                info!(path = %slsa_path.display(), bytes = bytes.len(), level = slsa_build_level, "attached SLSA");
+            }
             let manifest_bytes = std::fs::read(&manifest)?;
             let key_hex = resolve_signing_key(
                 signing_key_stdin,
