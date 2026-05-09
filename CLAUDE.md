@@ -19,11 +19,11 @@ construct AdmitArtifactInput with pack_hash → ComplianceAttestation.result_has
    ↓
 construct ComplianceRun (per-test outcomes) → input.compliance_run
    ↓
-sign state-leaf root (in `Cmd::Publish` today: Blake3Signer
-   keyed-HMAC, shape-checked by cartorio — NOT cryptographic.
-   `Ed25519Signer` exists in lib + cosign module but is NOT wired
-   into the `Cmd::Publish` codepath; reaching it requires a
-   library consumer. Phase C makes this real.)
+sign state-leaf root with Ed25519Signer (production default since
+   v0.7.0 / Phase C1). Cartorio cryptographically verifies the
+   signature against the publisher's public key in the verifier
+   policy. `--algorithm blake3` retained for tests/demos only — emits
+   a deprecation warning on stderr.
    ↓
 POST cartorio admit
    ↓
@@ -62,9 +62,9 @@ PUT lacre push (lacre asks cartorio → forwards if Active+org match)
 
 | Signer | When to use | Wire-up status |
 |---|---|---|
-| `Blake3Signer` | Tests, demos, clusters that haven't deployed Ed25519 verifier policy. Cartorio shape-checks (64 hex). | **CURRENTLY THE ONLY SIGNER `Cmd::Publish` CONSTRUCTS.** Production binary path. |
-| `Ed25519Signer` | Production target. Real cryptographic signatures verifiable by stock cosign tooling and cartorio's `verify_ed25519_signed_root`. | Lib-only; cosign-bundle module emits this format; **NOT yet reachable from `Cmd::Publish`** — Phase C wires it. |
-| `CosignSigner` (future, full keyless) | When Fulcio + Rekor are deployed. Sigstore Bundle v0.3 protobuf format + Fulcio cert chain + Rekor inclusion proof. | Not implemented. Phase C target. The current `cosign.rs` emits the **legacy** `cosign sign-blob --bundle` JSON shape, not Sigstore Bundle v0.3. |
+| `Ed25519Signer` | **Production default since v0.7.0 / Phase C1.** Real cryptographic signatures verifiable by `cartorio::merkle::verify_ed25519_signed_root` against the publisher's allow-listed pubkey. Sigstore/cosign-compatible. | **Default in `Cmd::Publish`.** Construct via `--algorithm ed25519` (default) + `--signing-key-file <path>` (preferred) or `--signing-key <hex>` (back-compat). Mutually exclusive. |
+| `Blake3Signer` | Tests, demos, clusters that haven't deployed an Ed25519 verifier policy. Cartorio shape-checks (64 hex). | Opt-in via `--algorithm blake3`. Emits a deprecation warning on stderr. |
+| `CosignSigner` (full Sigstore — Fulcio + Rekor) | When Fulcio + Rekor self-host land (Phase C2/C5). Sigstore Bundle v0.3 protobuf + Fulcio cert chain + Rekor inclusion proof. | Not yet wired. The current `cosign.rs` emits the **legacy** `cosign sign-blob --bundle` JSON shape; Phase C4/C5 migrate it to Sigstore Bundle v0.3 protobuf and add Rekor `tlog_entries`. |
 
 ## When adding a new pack to `pack_by_name`
 

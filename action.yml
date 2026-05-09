@@ -33,8 +33,27 @@ inputs:
       — without it tabeliao admits without proof, which the action refuses.
     required: true
   signing-key:
-    description: '64-hex-char signing key. Use a GitHub secret.'
-    required: true
+    description: |
+      64-hex-char private signing key. Use a GitHub secret.
+      Default algorithm is Ed25519 (cryptographic, cosign-compatible);
+      use `algorithm: blake3` for legacy HMAC-only environments.
+      In production prefer `signing-key-file` over inline `signing-key`
+      so the literal key never enters argv / shell history.
+    required: false
+  signing-key-file:
+    description: |
+      Path to a file containing the 64-hex private signing key. PREFERRED
+      over inline `signing-key` for production. Mutually exclusive with
+      `signing-key`. Pair with `actions/checkout` + a sops-or-akeyless
+      step that materializes the key to a tmpfs path.
+    required: false
+  algorithm:
+    description: |
+      Signing algorithm: `ed25519` (default, cryptographic) or `blake3`
+      (HMAC, shape-checked only). Blake3 is for tests/demos; production
+      MUST be ed25519.
+    required: false
+    default: 'ed25519'
   content-type:
     description: 'Manifest content-type.'
     required: false
@@ -42,7 +61,7 @@ inputs:
   tabeliao-version:
     description: 'tabeliao version to install (without leading v).'
     required: false
-    default: '0.3.0'
+    default: '0.7.0'
 
 outputs:
   artifact-id:
@@ -88,8 +107,20 @@ runs:
       shell: bash
       env:
         TABELIAO_SIGNING_KEY: ${{ inputs.signing-key }}
+        TABELIAO_SIGNING_KEY_FILE: ${{ inputs.signing-key-file }}
+        TABELIAO_SIGNING_ALGORITHM: ${{ inputs.algorithm }}
       run: |
         set -euo pipefail
+        # Validate exactly one signing-key source.
+        if [[ -n "${TABELIAO_SIGNING_KEY}" && -n "${TABELIAO_SIGNING_KEY_FILE}" ]]; then
+          echo "ERROR: set exactly one of inputs.signing-key OR inputs.signing-key-file"
+          exit 1
+        fi
+        if [[ -z "${TABELIAO_SIGNING_KEY}" && -z "${TABELIAO_SIGNING_KEY_FILE}" ]]; then
+          echo "ERROR: must set inputs.signing-key or inputs.signing-key-file"
+          exit 1
+        fi
+        # tabeliao reads TABELIAO_SIGNING_KEY{,_FILE} + _ALGORITHM directly.
         OUTPUT=$(tabeliao publish \
           --manifest      '${{ inputs.manifest }}' \
           --config        '${{ inputs.config }}' \
@@ -98,10 +129,9 @@ runs:
           --image         '${{ inputs.image-path }}' \
           --reference     '${{ inputs.reference }}' \
           --content-type  '${{ inputs.content-type }}' \
-          --pack          '${{ inputs.pack }}' \
-          --signing-key   "${TABELIAO_SIGNING_KEY}")
+          --pack          '${{ inputs.pack }}')
         echo "$OUTPUT"
-        # tabeliao publish emits JSON to stdout on success.
+        # tabeliao publish emits JSON to stdout; logs go to stderr.
         echo "artifact-id=$(echo "$OUTPUT" | jq -r .artifact_id)" >> "$GITHUB_OUTPUT"
         echo "digest=$(echo "$OUTPUT" | jq -r .digest)" >> "$GITHUB_OUTPUT"
         echo "composed-root=$(echo "$OUTPUT" | jq -r .composed_root)" >> "$GITHUB_OUTPUT"
