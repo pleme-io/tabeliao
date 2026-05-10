@@ -341,9 +341,23 @@ impl AttestationsConfig {
                 producer_pubkey_sha256: s.producer_pubkey_sha256.clone(),
                 signed_at_rfc3339: s.signed_at_rfc3339.clone(),
                 expires_at_rfc3339: s.expires_at_rfc3339.clone(),
+                // v0.7.0 (Phase H3) — wire-additive defaults preserve
+                // back-compat with v0.6.x SSDF chains. Operator opts in
+                // to the 3PAO substitution path by setting
+                // `signatory_class: third_party_assessor` + the
+                // assessor_* fields in attestations.yaml when SsdfBlock
+                // gains those (next minor bump).
+                signatory_class: cartorio::core::types::SsdfSignatoryClass::default(),
+                assessor_org: None,
+                assessor_accreditation_id: None,
+                assessor_pubkey_sha256: None,
                 poam_url: s.poam_url.clone(),
                 conforming_practices: s.conforming_practices.clone(),
             }),
+            // v0.7.0 (Phase H2) — VEX pillar. Wire-additive None default;
+            // tabeliao gains an `--attach-vex` CLI flag (next bump) to
+            // populate from a Trivy CycloneDX-VEX document.
+            vex: None,
         }
     }
 }

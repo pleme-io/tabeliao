@@ -19,6 +19,7 @@
 
 #![allow(clippy::items_after_statements)]
 
+use cartorio::testing::spawn_cartorio_server;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -82,25 +83,6 @@ async fn spawn_mock_backend() -> (String, Arc<MockBackend>) {
     (url, backend)
 }
 
-async fn spawn_cartorio() -> (String, Arc<CartorioAppState>) {
-    let cfg = RegistryConfig {
-        org: ORG.into(),
-        listen: "127.0.0.1:0".into(),
-        pki_url: None,
-        auth_bearer_token: None,
-        cors_allowed_origins: Vec::new(),
-        verifier: cartorio::config::VerifierPolicy::default(),
-    };
-    let state = CartorioAppState::new(cfg);
-    let app = cartorio_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (url, state)
-}
 
 async fn spawn_lacre(cartorio_url: String, backend_url: String, org: &str) -> String {
     let cartorio_client = HttpCartorioClient::new(cartorio_url).unwrap();
@@ -185,7 +167,7 @@ const FRAMP_COMPLIANT_MANIFEST: &[u8] = br#"{
 #[tokio::test]
 async fn full_publisher_loop_admits_and_pushes_compliant_image() {
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
-    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
@@ -231,7 +213,7 @@ async fn publish_idempotency_admit_only_once_per_digest() {
     // Publishing the same body twice must result in cartorio rejecting
     // the second admit (already-admitted) — without leaking state.
     let (backend_url, _backend) = spawn_mock_backend().await;
-    let (cartorio_url, _cstate) = spawn_cartorio().await;
+    let (cartorio_url, _cstate) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
@@ -266,7 +248,7 @@ async fn publish_fails_at_admit_stage_when_signing_key_drifts() {
     // documents that current behavior; if/when cartorio adds signature
     // VERIFICATION, this test must flip and assert rejection.
     let (backend_url, _backend) = spawn_mock_backend().await;
-    let (cartorio_url, _cstate) = spawn_cartorio().await;
+    let (cartorio_url, _cstate) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let bad_signer = Blake3Signer::from_hex(&"f".repeat(64)).unwrap();
@@ -354,7 +336,7 @@ async fn publish_with_compliant_manifest_and_pack_admits_with_pack_hash_in_attes
     // the pack_hash anyone can re-derive by running the pack against
     // the same manifest. cartorio holds it in the merkle tree.
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
-    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
@@ -411,7 +393,7 @@ async fn publish_with_non_compliant_manifest_aborts_before_anything_is_admitted(
     // The fail-closed property. Bad manifest → pack fails →
     // tabeliao refuses to call cartorio. Nothing reaches the registry.
     let (backend_url, backend_recorder) = spawn_mock_backend().await;
-    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
@@ -455,7 +437,7 @@ async fn provable_statement_openclaw_is_fedramp_high() {
     //      result_hash
     // If all four hold, the statement is provably true.
     let (backend_url, _backend) = spawn_mock_backend().await;
-    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
@@ -513,7 +495,7 @@ async fn semantic_tamper_changes_pack_hash_and_breaks_the_proof() {
     // separate `digest` field handles byte-identity. Both layers
     // together = full tamper-evidence. See companion test below.
     let (backend_url, _backend) = spawn_mock_backend().await;
-    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
@@ -592,7 +574,7 @@ async fn byte_only_tamper_yields_same_pack_hash_but_different_digest() {
 #[tokio::test]
 async fn unknown_pack_name_aborts_publish_at_input_validation() {
     let (backend_url, _backend) = spawn_mock_backend().await;
-    let (cartorio_url, _cstate) = spawn_cartorio().await;
+    let (cartorio_url, _cstate) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
 
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
@@ -657,7 +639,7 @@ async fn provable_statement_openclaw_bundle_is_fedramp_high() {
     // provably true under fedramp-high-openclaw-bundle@1.
 
     let (backend_url, _backend) = spawn_mock_backend().await;
-    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio_server().await;
     let lacre_url = spawn_lacre(cartorio_url.clone(), backend_url, ORG).await;
     let signer = Blake3Signer::from_hex(&"0".repeat(64)).unwrap();
 

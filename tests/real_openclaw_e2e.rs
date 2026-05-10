@@ -12,6 +12,7 @@
 
 #![allow(clippy::too_many_lines, clippy::uninlined_format_args)]
 
+use cartorio::testing::spawn_cartorio_server;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -108,25 +109,6 @@ async fn spawn_mock_backend() -> (String, Arc<MockBackend>) {
     (url, backend)
 }
 
-async fn spawn_cartorio() -> (String, Arc<CartorioAppState>) {
-    let cfg = RegistryConfig {
-        org: ORG.into(),
-        listen: "127.0.0.1:0".into(),
-        pki_url: None,
-        auth_bearer_token: None,
-        cors_allowed_origins: Vec::new(),
-        verifier: cartorio::config::VerifierPolicy::default(),
-    };
-    let state = CartorioAppState::new(cfg);
-    let app = cartorio_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://{addr}");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (url, state)
-}
 
 fn cfg_for(kind: ArtifactKind, name: &str, version: &str) -> AttestationsConfig {
     AttestationsConfig {
@@ -175,7 +157,7 @@ fn cfg_for(kind: ArtifactKind, name: &str, version: &str) -> AttestationsConfig 
 
 #[tokio::test]
 async fn real_openclaw_image_plus_chart_bundle_is_fedramp_high() {
-    let (cartorio_url, cartorio_state) = spawn_cartorio().await;
+    let (cartorio_url, cartorio_state) = spawn_cartorio_server().await;
     let (_backend_url, _backend) = spawn_mock_backend().await;
 
     // Real Ed25519 signer (the same primitive Sigstore/cosign use).

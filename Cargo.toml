@@ -51,7 +51,7 @@ default = []
 dev-seeds = []
 
 [dependencies]
-cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.6.0" }
+cartorio = { git = "https://github.com/pleme-io/cartorio", tag = "v0.7.2" }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
 base64 = "0.22"

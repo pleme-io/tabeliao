@@ -305,8 +305,8 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cartorio"
-version = "0.6.0"
-source = "git+https://github.com/pleme-io/cartorio?tag=v0.6.0#3f322f5915fb5dd9e299a372d26ae45c82378c41"
+version = "0.7.2"
+source = "git+https://github.com/pleme-io/cartorio?tag=v0.7.2#2294b374cdda7e0a556f362e11f53db9c09d65f6"
 dependencies = [
  "async-trait",
  "axum",
